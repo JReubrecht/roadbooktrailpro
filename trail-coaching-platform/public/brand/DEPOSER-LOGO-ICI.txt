@@ -1,0 +1,5 @@
+Déposez ici votre logo définitif nommé exactement :
+mykairn-coach-logo.svg
+
+Formats acceptés : .svg (recommandé) ou modifiez `customLogoPath` dans `src/config/brand.ts` si vous utilisez un fichier `.png` ou `.webp`.
+Tant que ce fichier n'est pas présent, la plateforme affiche automatiquement le monogramme vectoriel officiel myKairn Coach ("Alpine Performance").
