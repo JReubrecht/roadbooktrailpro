@@ -204,6 +204,15 @@ rules_version = '2';
 //       - attachment: map (optional; allowed keys ['type', 'label', 'href'], type in ['roadbook', 'checkin_ref', 'session_note'], label 1..160 chars, href optional <= 300 chars)
 //       - createdAt: timestamp | ISO datetime string (required, immutable)
 //
+// 15. Collection: platformConfig
+//     Document ID: {configId} (e.g. 'global')
+//     Fields:
+//       - promoBanner: map (optional; allowed keys ['enabled', 'eyebrow', 'message', 'ctaLabel', 'ctaHref', 'accentHex'])
+//       - featureFlags: map (optional; allowed keys ['programSalesEnabled'])
+//       - customLogoUrl: string | null (optional, 0..250000 chars)
+//       - updatedAt: timestamp | ISO datetime string (optional)
+//       - updatedBy: string (optional, 1..160 chars)
+//
 // ============================================================================
 
 service cloud.firestore {
@@ -785,6 +794,51 @@ service cloud.firestore {
         isValidDateTime(data.createdAt);
     }
 
+    function isValidPlatformPromoBanner(banner) {
+      return banner is map &&
+        banner.keys().hasOnly([
+          'enabled',
+          'eyebrow',
+          'message',
+          'ctaLabel',
+          'ctaHref',
+          'accentHex'
+        ]) &&
+        banner.keys().hasAll([
+          'enabled',
+          'eyebrow',
+          'message',
+          'ctaLabel',
+          'ctaHref'
+        ]) &&
+        banner.enabled is bool &&
+        banner.eyebrow is string && banner.eyebrow.size() <= 80 &&
+        banner.message is string && banner.message.size() <= 240 &&
+        banner.ctaLabel is string && banner.ctaLabel.size() <= 60 &&
+        banner.ctaHref is string && banner.ctaHref.size() <= 240 &&
+        (banner.ctaHref == '' || banner.ctaHref.matches("^(/([^/].*)?|#.*|https?://.+)$")) &&
+        isValidOptionalString(banner, 'accentHex', 0, 20);
+    }
+
+    function isValidPlatformConfig(data) {
+      return data.keys().hasOnly([
+          'promoBanner',
+          'featureFlags',
+          'customLogoUrl',
+          'updatedAt',
+          'updatedBy'
+        ]) &&
+        (!('promoBanner' in data) || isValidPlatformPromoBanner(data.promoBanner)) &&
+        (!('featureFlags' in data) || (
+          data.featureFlags is map &&
+          data.featureFlags.keys().hasOnly(['programSalesEnabled']) &&
+          (!('programSalesEnabled' in data.featureFlags) || data.featureFlags.programSalesEnabled is bool)
+        )) &&
+        (!('customLogoUrl' in data) || data.customLogoUrl == null || (data.customLogoUrl is string && data.customLogoUrl.size() <= 250000)) &&
+        (!('updatedAt' in data) || isValidDateTime(data.updatedAt)) &&
+        (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 160));
+    }
+
     // ========================================================================
     // 1. users/{userId}
     // ========================================================================
@@ -1142,7 +1196,22 @@ service cloud.firestore {
     }
 
     // ========================================================================
-    // 15. Default Deny Everything Else
+    // 15. platformConfig/{configId}
+    // ========================================================================
+    match /platformConfig/{configId} {
+      // Lecture publique pour 'global' (bandeau, logo, feature flags) ; réservée aux coachs/admins sinon
+      allow read: if configId == 'global' || isCoachOrAdmin();
+
+      // Création et mise à jour réservées aux coachs/admins avec validation stricte du schéma
+      allow create, update: if isCoachOrAdmin()
+        && isValidPlatformConfig(request.resource.data);
+
+      // Suppression interdite pour préserver la configuration globale de la plateforme
+      allow delete: if false;
+    }
+
+    // ========================================================================
+    // 16. Default Deny Everything Else
     // ========================================================================
     match /{document=**} {
       allow read, write: if false;

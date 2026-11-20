@@ -191,34 +191,77 @@ export const adminConfigUpdateSchema = z.object({
 
 export const chatRoomUpdateSchema = z.object({
   roomId: z.string().min(1),
-  action: z.enum(['update', 'archive']),
-  name: z.string().trim().min(2).max(100).optional(),
-  description: z.string().max(300).optional(),
+  action: z.enum(['update']).default('update'),
+  name: z.string().trim().min(2).max(80).optional(),
+  description: z.string().trim().max(300).optional(),
+  pinnedMessage: z.string().trim().max(500).optional(),
   memberIds: z.array(z.string().min(1)).max(100).optional(),
-  isArchived: z.boolean().optional(),
-  isCoachOnlyPost: z.boolean().optional(),
 });
+
+const ISO_DATE_TIME_REGEX =
+  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?:T([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.\d{1,9})?)?(Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?)?$/;
+
+function isValidIsoCalendarDateTime(value: string): boolean {
+  const match = ISO_DATE_TIME_REGEX.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    return false;
+  }
+  return !isNaN(new Date(value).getTime());
+}
+
+export const roadbookWaypointSchema = z
+  .object({
+    id: z.string().min(1).max(120),
+    name: z.string().trim().min(1).max(160),
+    lat: z.number().finite().min(-90).max(90),
+    lon: z.number().finite().min(-180).max(180),
+    ele: z.number().finite().min(-500).max(9000),
+    pointIndex: z.number().int().min(0),
+    pauseMinutes: z.number().min(0).max(1440).optional(),
+    timeModifierPct: z.number().min(10).max(300).optional(),
+    cutoffTimeIso: z
+      .string()
+      .trim()
+      .max(40)
+      .refine((v) => v === '' || isValidIsoCalendarDateTime(v), 'Barrière horaire invalide')
+      .optional(),
+    technicality: z
+      .union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)])
+      .optional(),
+    type: z.enum(['start', 'aid_station', 'life_base', 'pass', 'finish']).optional(),
+    desc: z.string().max(1000).optional(),
+    plannedNutrition: z
+      .record(z.string().min(1).max(80), z.number().int().min(0).max(200))
+      .optional(),
+  })
+  .passthrough();
 
 export const roadbookSaveSchema = z
   .object({
     id: z.string().min(1).max(120),
     userId: z.string().min(1).optional(),
-    title: z.string().trim().min(1).max(160),
-    raceName: z.string().max(160).optional(),
-    raceDate: z.string().max(40).optional(),
-    startTimeIso: z.string().max(60).optional(),
-    distanceKm: z.number().min(0).max(2000),
-    elevationGainM: z.number().min(0).max(50000),
-    elevationLossM: z.number().min(0).max(50000).optional(),
-    gpxFileName: z.string().max(200).optional(),
-    gpxTrackPoints: z.array(z.record(z.string(), z.unknown())).max(15000).optional(),
-    waypoints: z.array(z.record(z.string(), z.unknown())).max(200),
-    nutritionItems: z.array(z.record(z.string(), z.unknown())).max(200).optional(),
-    nutritionIntakeIntervalMin: z.number().min(5).max(240).optional(),
-    paceConfig: z.record(z.string(), z.unknown()).optional(),
-    splits: z.array(z.record(z.string(), z.unknown())).max(200).optional(),
-    notes: z.string().max(5000).optional(),
-    isPublicTemplate: z.boolean().optional(),
+    name: z.string().trim().min(1).max(160),
+    officialDistanceKm: z.number().min(0).max(2000).optional(),
+    officialElevationM: z.number().min(0).max(50000).optional(),
+    startTimeIso: z
+      .string()
+      .trim()
+      .min(10, 'Heure de départ invalide')
+      .max(40)
+      .refine(isValidIsoCalendarDateTime, 'Heure de départ invalide')
+      .optional(),
+    isPublic: z.boolean().optional(),
+    points: z.array(z.record(z.string(), z.unknown())).max(15000),
+    waypoints: z.array(roadbookWaypointSchema).max(200),
   })
   .passthrough();
 
@@ -226,19 +269,18 @@ export const athleteProfilePatchSchema = z
   .object({
     userId: z.string().min(1),
     notesCoach: z.string().max(5000).optional(),
-    tierStatus: z.enum(['free', 'plan_buyer', 'coached', 'pilot_free']).optional(),
+    tierStatus: z
+      .enum(['free', 'plan_only', 'coaching_paid', 'pilot_showcase'])
+      .optional(),
     isShowcaseFeatured: z.boolean().optional(),
     showcaseQuote: z.string().max(500).optional(),
-    primaryGoalRace: z.string().max(160).optional(),
-    primaryGoalDate: z.string().max(40).optional(),
-    weeklyAvailabilityHours: z.number().min(0).max(60).optional(),
-    itraScore: z.number().min(0).max(1200).optional(),
-    utmbIndex: z.number().min(0).max(1200).optional(),
-    vmaKmH: z.number().min(5).max(30).optional(),
-    restingHr: z.number().int().min(25).max(120).optional(),
+    showcaseBio: z.string().max(1000).optional(),
+    restingHr: z.number().int().min(25).max(130).optional(),
     maxHr: z.number().int().min(100).max(230).optional(),
+    lthr: z.number().int().min(80).max(215).optional(),
+    vmaKmh: z.number().min(5).max(30).optional(),
     weightKg: z.number().min(30).max(200).optional(),
-    bio: z.string().max(1000).optional(),
+    trailIndex: z.number().int().min(200).max(1200).optional(),
   })
   .passthrough();
 
@@ -249,12 +291,13 @@ export const trainingPlanUpsertSchema = z
     slug: z.string().trim().min(2).max(160).optional(),
     subtitle: z.string().max(240).optional(),
     description: z.string().max(4000),
-    level: z.enum(['debutant', 'intermediaire', 'confirme', 'expert']),
+    level: z
+      .enum(['Découverte', 'Intermédiaire', 'Confirmé', 'Expert Ultra'])
+      .optional(),
     durationWeeks: z.number().int().min(1).max(52),
-    distanceCategory: z.string().max(80),
-    priceEur: z.number().min(0).max(5000),
-    isPublished: z.boolean().optional(),
-    isFreePreview: z.boolean().optional(),
+    priceCents: z.number().int().min(0).max(500000),
+    currency: z.literal('EUR').optional(),
+    status: z.enum(['draft', 'published', 'archived']).optional(),
   })
   .passthrough();
 

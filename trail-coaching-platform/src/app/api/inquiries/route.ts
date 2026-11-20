@@ -1,31 +1,85 @@
-import { NextResponse } from 'next/server';
+import crypto from 'node:crypto';
+import { NextRequest, NextResponse } from 'next/server';
+import { getAdminDb, isFirebaseAdminConfigured } from '@/lib/firebase/admin';
+import { notifyCoachNewInquiry } from '@/lib/notifications/email';
 import { coachingInquirySchema } from '@/lib/validation/schemas';
 import type { CoachingInquiry } from '@/types/domain';
 
-export async function POST(request: Request) {
-  try {
-    const rawBody = await request.json().catch(() => null);
-    const parsed = coachingInquirySchema.safeParse(rawBody);
+const RATE_WINDOW_MS = 10 * 60 * 1000;
+const MAX_REQUESTS_PER_WINDOW = 6;
 
-    if (!parsed.success) {
-      return NextResponse.json(
-        {
-          error: 'Veuillez vérifier les informations saisies dans le formulaire.',
-          details: parsed.error.flatten().fieldErrors,
-        },
-        { status: 400 }
-      );
-    }
+const globalRateLimiter = globalThis as typeof globalThis & {
+  __mykairnInquiryRateMap?: Map<string, number[]>;
+};
 
-    const inquiry: CoachingInquiry = {
-      id: `inq-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      ...parsed.data,
-      createdAt: new Date().toISOString(),
-    };
-
-    return NextResponse.json({ inquiry, ok: true });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Erreur lors de l'envoi de la demande.";
-    return NextResponse.json({ error: message }, { status: 400 });
+function isRateLimited(ip: string): boolean {
+  if (!globalRateLimiter.__mykairnInquiryRateMap) {
+    globalRateLimiter.__mykairnInquiryRateMap = new Map<string, number[]>();
   }
+  const map = globalRateLimiter.__mykairnInquiryRateMap;
+  const now = Date.now();
+  const timestamps = (map.get(ip) || []).filter((ts) => now - ts < RATE_WINDOW_MS);
+  if (timestamps.length >= MAX_REQUESTS_PER_WINDOW) {
+    map.set(ip, timestamps);
+    return true;
+  }
+  timestamps.push(now);
+  map.set(ip, timestamps);
+  return false;
+}
+
+export async function POST(request: NextRequest) {
+  const clientIp =
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    request.headers.get('x-real-ip') ||
+    'unknown';
+
+  if (isRateLimited(clientIp)) {
+    return NextResponse.json(
+      {
+        error:
+          'Trop de demandes envoyées récemment. Merci de patienter quelques minutes avant de réessayer.',
+      },
+      { status: 429 }
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Payload JSON invalide.' }, { status: 400 });
+  }
+
+  const parsed = coachingInquirySchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: 'Formulaire incomplet ou invalide', issues: parsed.error.flatten() },
+      { status: 400 }
+    );
+  }
+
+  const inquiry: CoachingInquiry = {
+    id: `inq-${crypto.randomUUID()}`,
+    name: parsed.data.name,
+    email: parsed.data.email,
+    offerInterest: parsed.data.offerInterest,
+    goal: parsed.data.goal,
+    weeklyHours: parsed.data.weeklyHours,
+    rgpdConsent: parsed.data.rgpdConsent,
+    marketingOptIn: parsed.data.marketingOptIn,
+    createdAt: new Date().toISOString(),
+  };
+
+  if (isFirebaseAdminConfigured()) {
+    const adminDb = getAdminDb();
+    if (!adminDb) {
+      return NextResponse.json({ error: 'Firestore Admin indisponible.' }, { status: 500 });
+    }
+    await adminDb.collection('coachingInquiries').doc(inquiry.id).set(inquiry);
+  }
+
+  await notifyCoachNewInquiry(inquiry);
+
+  return NextResponse.json({ ok: true, inquiry }, { status: 201 });
 }

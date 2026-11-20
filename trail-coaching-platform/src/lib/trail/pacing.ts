@@ -1,5 +1,5 @@
 import { getTimes as getSunTimes } from 'suncalc';
-import type { PaceProfile, WeatherCondition } from '@/types/domain';
+import type { PaceProfile, RoadbookSegment, WeatherCondition } from '@/types/domain';
 
 export interface DerivedItraConfig {
   fatiguePercent: number;
@@ -68,9 +68,21 @@ export function getWeatherCoefficient(weather: WeatherCondition | number): numbe
  * Calcule l'intensité nocturne (0 = jour, 1 = pleine nuit) à partir des heures solaires SunCalc.
  */
 export function getNightIntensity(dateObj: Date, lat: number, lon: number): number {
-  if (!dateObj || isNaN(dateObj.getTime()) || !lat || !lon) return 0;
+  if (
+    !dateObj ||
+    isNaN(dateObj.getTime()) ||
+    lat == null ||
+    lon == null ||
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon)
+  ) {
+    return 0;
+  }
 
   const times = getSunTimes(dateObj, lat, lon);
+  if (times.alwaysDown) return 1;
+  if (times.alwaysUp || !times.sunset || !times.sunrise) return 0;
+
   const time = dateObj.getTime();
   const sunset = times.sunset.getTime();
   const sunrise = times.sunrise.getTime();
@@ -83,12 +95,18 @@ export function getNightIntensity(dateObj: Date, lat: number, lon: number): numb
       prevSunset = sunset;
       const tomorrow = new Date(dateObj);
       tomorrow.setDate(tomorrow.getDate() + 1);
-      nextSunrise = getSunTimes(tomorrow, lat, lon).sunrise.getTime();
+      const nextTimes = getSunTimes(tomorrow, lat, lon);
+      if (nextTimes.alwaysDown) return 1;
+      if (!nextTimes.sunrise) return 0;
+      nextSunrise = nextTimes.sunrise.getTime();
     } else {
       nextSunrise = sunrise;
       const yesterday = new Date(dateObj);
       yesterday.setDate(yesterday.getDate() - 1);
-      prevSunset = getSunTimes(yesterday, lat, lon).sunset.getTime();
+      const prevTimes = getSunTimes(yesterday, lat, lon);
+      if (prevTimes.alwaysDown) return 1;
+      if (!prevTimes.sunset) return 0;
+      prevSunset = prevTimes.sunset.getTime();
     }
 
     const nadirTime = prevSunset + (nextSunrise - prevSunset) / 2;
@@ -99,6 +117,114 @@ export function getNightIntensity(dateObj: Date, lat: number, lon: number): numb
   }
 
   return 0;
+}
+
+export interface RoadbookSolarSummary {
+  hasValidDate: boolean;
+  hasValidCoords: boolean;
+  polarState: 'normal' | 'always_up' | 'always_down' | 'unknown';
+  sunriseIso: string | null;
+  sunsetIso: string | null;
+  dawnIso: string | null;
+  duskIso: string | null;
+  nextDaySunriseIso: string | null;
+  spansMultipleDays: boolean;
+  nightSegmentsCount: number;
+  nightDistanceKm: number;
+  nightDurationFastMs: number;
+}
+
+/**
+ * Résumé solaire SunCalc pour le roadbook (lever/coucher de soleil, crépuscule, bilan nocturne).
+ * Le seuil `nightIntensity > 0.25` est aligné avec les bandes nocturnes de `ElevationProfileSvg`.
+ */
+export function getRoadbookSolarSummary(params: {
+  startTimeIso: string;
+  endTimeIso?: string;
+  lat?: number | null;
+  lon?: number | null;
+  segments: RoadbookSegment[];
+}): RoadbookSolarSummary {
+  const startDate = params.startTimeIso ? new Date(params.startTimeIso) : new Date(NaN);
+  const hasValidDate = !isNaN(startDate.getTime());
+  const hasValidCoords =
+    params.lat != null &&
+    params.lon != null &&
+    Number.isFinite(params.lat) &&
+    Number.isFinite(params.lon);
+
+  const nightSegments = params.segments.filter((s) => s.nightIntensity > 0.25);
+  const nightSegmentsCount = nightSegments.length;
+  const nightDistanceKm = Number(
+    nightSegments.reduce((acc, s) => acc + s.distanceKm, 0).toFixed(1)
+  );
+  const nightDurationFastMs = nightSegments.reduce((acc, s) => acc + s.durationFastMs, 0);
+
+  const endDate = params.endTimeIso ? new Date(params.endTimeIso) : new Date(NaN);
+  const spansMultipleDays =
+    hasValidDate &&
+    !isNaN(endDate.getTime()) &&
+    (endDate.getFullYear() !== startDate.getFullYear() ||
+      endDate.getMonth() !== startDate.getMonth() ||
+      endDate.getDate() !== startDate.getDate());
+
+  if (!hasValidDate || !hasValidCoords) {
+    return {
+      hasValidDate,
+      hasValidCoords,
+      polarState: 'unknown',
+      sunriseIso: null,
+      sunsetIso: null,
+      dawnIso: null,
+      duskIso: null,
+      nextDaySunriseIso: null,
+      spansMultipleDays,
+      nightSegmentsCount,
+      nightDistanceKm,
+      nightDurationFastMs,
+    };
+  }
+
+  const times = getSunTimes(
+    startDate,
+    params.lat as number,
+    params.lon as number,
+    0,
+    -startDate.getTimezoneOffset()
+  );
+
+  let polarState: RoadbookSolarSummary['polarState'] = 'normal';
+  if (times.alwaysUp) polarState = 'always_up';
+  else if (times.alwaysDown) polarState = 'always_down';
+
+  let nextDaySunriseIso: string | null = null;
+  if (spansMultipleDays) {
+    const nextDay = new Date(startDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+    const nextTimes = getSunTimes(
+      nextDay,
+      params.lat as number,
+      params.lon as number,
+      0,
+      -nextDay.getTimezoneOffset()
+    );
+    nextDaySunriseIso = nextTimes.sunrise ? nextTimes.sunrise.toISOString() : null;
+  }
+
+  return {
+    hasValidDate,
+    hasValidCoords,
+    polarState,
+    sunriseIso: times.sunrise ? times.sunrise.toISOString() : null,
+    sunsetIso: times.sunset ? times.sunset.toISOString() : null,
+    dawnIso: times.dawn ? times.dawn.toISOString() : null,
+    duskIso: times.dusk ? times.dusk.toISOString() : null,
+    nextDaySunriseIso,
+    spansMultipleDays,
+    nightSegmentsCount,
+    nightDistanceKm,
+    nightDurationFastMs,
+  };
 }
 
 export function getNightCoefficient(nightIntensity: number): number {

@@ -1,6 +1,13 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
@@ -8,9 +15,11 @@ import {
   signOut,
   GoogleAuthProvider,
   signInWithPopup,
+  sendPasswordResetEmail,
+  updateProfile,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { firebaseAuth, firestoreDb, isFirebaseConfigured } from '@/lib/firebase/client';
+import { authFetch } from '@/lib/firebase/authFetch';
+import { firebaseAuth, isFirebaseConfigured } from '@/lib/firebase/client';
 import { createInitialDemoState, type PlatformStoreState } from '@/lib/seed/demoData';
 import { evaluateAccess, type EvaluatedAccess } from '@/lib/access/entitlements';
 import {
@@ -45,6 +54,23 @@ const PERSONA_KEY = 'mykairn_coach_active_persona_v1';
 const BANNER_KEY = 'mykairn_coach_promo_banner_v1';
 const FLAGS_KEY = 'mykairn_coach_feature_flags_v1';
 
+const EMPTY_LIVE_STORE: PlatformStoreState = {
+  users: [],
+  athleteProfiles: [],
+  trainingPlans: [],
+  roadbooks: [],
+  orders: [],
+  entitlements: [],
+  intervalsConnections: [],
+  intervalsSnapshots: [],
+  checkIns: [],
+  communityChallenges: [],
+  communityPosts: [],
+  coachingInquiries: [],
+  chatRooms: [],
+  chatMessages: [],
+};
+
 export type DemoPersonaId =
   | 'visitor'
   | 'pilot-claire'
@@ -75,6 +101,7 @@ interface PlatformContextValue {
     consents: { rgpd: boolean; marketing: boolean }
   ) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
   logoutUser: () => Promise<void>;
   resetDemoData: () => void;
 
@@ -110,7 +137,9 @@ interface PlatformContextValue {
   }) => Promise<{ order: Order; entitlement: Entitlement | null }>;
   addCommunityPost: (post: Omit<CommunityPost, 'id' | 'likesCount' | 'createdAt'>) => void;
   likeCommunityPost: (postId: string) => void;
-  saveRoadbook: (rb: RoadbookDoc) => void;
+  saveRoadbook: (
+    rb: RoadbookDoc
+  ) => Promise<{ ok: boolean; error?: string; roadbook: RoadbookDoc }>;
   submitCoachingInquiry: (
     payload: Omit<CoachingInquiry, 'id' | 'createdAt'>
   ) => Promise<CoachingInquiry>;
@@ -156,15 +185,48 @@ export function usePlatform() {
 }
 
 export function PlatformProvider({ children }: { children: React.ReactNode }) {
-  const [store, setStore] = useState<PlatformStoreState>(() => createInitialDemoState());
+  const [store, setStore] = useState<PlatformStoreState>(() =>
+    isFirebaseConfigured ? EMPTY_LIVE_STORE : createInitialDemoState()
+  );
   const [activePersonaId, setActivePersonaId] = useState<string>('visitor');
   const [promoBanner, setPromoBanner] = useState<PromoBannerConfig>(BRAND_CONFIG.promoBanner);
   const [customLogoUrl, setCustomLogoUrlState] = useState<string | null>(null);
   const [featureFlags, setFeatureFlags] = useState<PlatformFeatureFlags>(DEFAULT_FEATURE_FLAGS);
   const [isReady, setIsReady] = useState(false);
 
-  // Hydratation locale asynchrone après montage (évite tout hydration mismatch SSR/client)
+  const loadLiveBootstrap = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/platform/bootstrap');
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        mode?: string;
+        session?: { uid: string } | null;
+        promoBanner?: PromoBannerConfig;
+        featureFlags?: PlatformFeatureFlags;
+        customLogoUrl?: string | null;
+        store?: PlatformStoreState;
+      };
+      if (data.promoBanner) {
+        setPromoBanner(data.promoBanner);
+      }
+      if (data.featureFlags) {
+        setFeatureFlags(data.featureFlags);
+      }
+      if (data.customLogoUrl !== undefined) {
+        setCustomLogoUrlState(data.customLogoUrl);
+      }
+      if (data.mode === 'firebase_admin' && data.store) {
+        setStore(data.store);
+        setActivePersonaId(data.session?.uid || 'visitor');
+      }
+    } catch (err) {
+      console.warn('[Platform Bootstrap] Chargement serveur indisponible:', err);
+    }
+  }, []);
+
+  // Hydratation sandbox hors Firebase uniquement
   useEffect(() => {
+    if (isFirebaseConfigured) return;
     let cancelled = false;
     Promise.resolve().then(() => {
       if (cancelled) return;
@@ -210,9 +272,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // Persistance locale automatique
+  // Persistance locale automatique (mode sandbox hors Firebase uniquement)
   useEffect(() => {
-    if (!isReady) return;
+    if (!isReady || isFirebaseConfigured) return;
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
     } catch {
@@ -220,74 +282,29 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
   }, [store, isReady]);
 
-  // Synchronisation Firebase Auth si configuré dans .env.local
+  // Synchronisation Firebase Auth + bootstrap Firestore Admin côté serveur
   useEffect(() => {
     if (!isFirebaseConfigured || !firebaseAuth) return;
-    const auth = firebaseAuth;
+    let cancelled = false;
 
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) return;
-
-      const adminEmails = (process.env.NEXT_PUBLIC_ADMIN_EMAILS || '')
-        .split(',')
-        .map((e) => e.trim().toLowerCase())
-        .filter(Boolean);
-      const isAdminEmail = fbUser.email ? adminEmails.includes(fbUser.email.toLowerCase()) : false;
-
-      let resolvedUser: UserDoc = {
-        id: fbUser.uid,
-        email: fbUser.email || '',
-        displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'Athlète',
-        role: isAdminEmail ? 'coach' : 'athlete',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      if (firestoreDb) {
-        try {
-          const userSnap = await getDoc(doc(firestoreDb, 'users', fbUser.uid));
-          if (userSnap.exists()) {
-            const data = userSnap.data() as Partial<UserDoc>;
-            resolvedUser = {
-              ...resolvedUser,
-              ...data,
-              id: fbUser.uid,
-              role: (data.role as UserDoc['role']) || resolvedUser.role,
-            };
-          } else {
-            await setDoc(doc(firestoreDb, 'users', fbUser.uid), resolvedUser);
-          }
-        } catch (err) {
-          console.warn('[Firebase Auth] Lecture profil users impossible:', err);
+    const unsub = onAuthStateChanged(firebaseAuth, async (fbUser) => {
+      try {
+        await loadLiveBootstrap();
+        if (!cancelled && !fbUser) {
+          setActivePersonaId('visitor');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsReady(true);
         }
       }
-
-      setStore((prev) => {
-        const exists = prev.users.some((u) => u.id === resolvedUser.id);
-        const nextUsers = exists
-          ? prev.users.map((u) => (u.id === resolvedUser.id ? resolvedUser : u))
-          : [...prev.users, resolvedUser];
-
-        const hasProfile = prev.athleteProfiles.some((p) => p.userId === resolvedUser.id);
-        const nextProfiles = hasProfile
-          ? prev.athleteProfiles
-          : [
-              ...prev.athleteProfiles,
-              {
-                userId: resolvedUser.id,
-                tierStatus: (isAdminEmail ? 'coaching_paid' : 'free') as TierStatus,
-                isShowcaseFeatured: false,
-                updatedAt: new Date().toISOString(),
-              },
-            ];
-
-        return { ...prev, users: nextUsers, athleteProfiles: nextProfiles };
-      });
-      setActivePersonaId(resolvedUser.id);
     });
 
-    return () => unsub();
-  }, []);
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [loadLiveBootstrap]);
 
   const currentUser = useMemo<UserDoc | null>(() => {
     if (activePersonaId === 'visitor') return null;
@@ -305,6 +322,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   );
 
   const switchPersona = (personaId: DemoPersonaId) => {
+    if (isFirebaseConfigured) return;
     setActivePersonaId(personaId);
     try {
       window.localStorage.setItem(PERSONA_KEY, personaId);
@@ -340,28 +358,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
 
     if (isFirebaseConfigured && firebaseAuth) {
       const cred = await createUserWithEmailAndPassword(firebaseAuth, email, password);
-      const newUser: UserDoc = {
-        id: cred.user.uid,
-        email,
-        displayName,
-        role: 'athlete',
-        consents: {
-          termsAcceptedAt: nowIso,
-          privacyAcceptedAt: nowIso,
-          marketingOptIn: consents.marketing,
-        },
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-      if (firestoreDb) {
-        await setDoc(doc(firestoreDb, 'users', cred.user.uid), newUser);
-        await setDoc(doc(firestoreDb, 'athleteProfiles', cred.user.uid), {
-          userId: cred.user.uid,
-          tierStatus: 'free',
-          isShowcaseFeatured: false,
-          updatedAt: nowIso,
-        });
+      if (displayName.trim()) {
+        await updateProfile(cred.user, { displayName: displayName.trim() });
+        await cred.user.getIdToken(true);
       }
+      await loadLiveBootstrap();
       return;
     }
 
@@ -410,7 +411,19 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     switchPersona('visitor');
   };
 
+  const sendPasswordReset = async (email: string) => {
+    if (!isFirebaseConfigured || !firebaseAuth) {
+      throw new Error('La réinitialisation de mot de passe nécessite Firebase Auth.');
+    }
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      throw new Error('Veuillez saisir votre adresse email.');
+    }
+    await sendPasswordResetEmail(firebaseAuth, cleanEmail);
+  };
+
   const resetDemoData = () => {
+    if (isFirebaseConfigured) return;
     const fresh = createInitialDemoState();
     setStore(fresh);
     switchPersona('coach-admin-1');
@@ -423,6 +436,14 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
 
   const updatePromoBanner = (banner: PromoBannerConfig) => {
     setPromoBanner(banner);
+    if (isFirebaseConfigured) {
+      void authFetch('/api/admin/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ promoBanner: banner }),
+      });
+      return;
+    }
     try {
       window.localStorage.setItem(BANNER_KEY, JSON.stringify(banner));
     } catch {
@@ -432,6 +453,14 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
 
   const setCustomLogoDataUrl = (dataUrl: string | null) => {
     setCustomLogoUrlState(dataUrl);
+    if (isFirebaseConfigured) {
+      void authFetch('/api/admin/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customLogoUrl: dataUrl }),
+      });
+      return;
+    }
     try {
       if (dataUrl) {
         window.localStorage.setItem('mykairn_custom_logo_dataurl', dataUrl);
@@ -449,7 +478,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     apiKey: string;
     healthDataConsent: true;
   }) => {
-    const res = await fetch('/api/intervals/connect', {
+    const res = await authFetch('/api/intervals/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -466,7 +495,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || 'Connexion Intervals.icu échouée.');
     }
 
-    const conn = data.connection as IntervalsConnectionPublic & { secretEncrypted: string };
+    const conn = data.connection as IntervalsConnectionPublic;
     const snap = data.snapshot as IntervalsSnapshot | null;
     const nowIso = new Date().toISOString();
 
@@ -506,18 +535,22 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       ...prev,
       intervalsConnections: prev.intervalsConnections.filter((c) => c.userId !== userId),
     }));
+    void authFetch('/api/intervals/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId }),
+    });
   };
 
   const syncAthleteIntervals = async (userId: string): Promise<IntervalsSnapshot> => {
     const conn = store.intervalsConnections.find((c) => c.userId === userId);
-    const res = await fetch('/api/intervals/sync', {
+    const res = await authFetch('/api/intervals/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userId,
         intervalsAthleteId: conn?.intervalsAthleteId || '0',
-        secretEncrypted: conn?.secretEncrypted,
-        demoMode: !conn?.secretEncrypted,
+        demoMode: !isFirebaseConfigured && !conn,
       }),
     });
 
@@ -535,6 +568,8 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
 
     const snap = data.snapshot as IntervalsSnapshot;
+    const syncedAt =
+      data.lastSyncedAt || data.connectionStatus?.lastSyncAt || new Date().toISOString();
     setStore((prev) => ({
       ...prev,
       intervalsSnapshots: [
@@ -546,7 +581,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
           ? {
               ...c,
               syncStatus: 'ok',
-              lastSyncedAt: data.lastSyncedAt,
+              lastSyncedAt: syncedAt,
               lastErrorMessage: undefined,
             }
           : c
@@ -556,7 +591,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   };
 
   const submitCheckIn = async (payload: Omit<CheckIn, 'id' | 'createdAt'>): Promise<CheckIn> => {
-    const res = await fetch('/api/check-ins', {
+    const res = await authFetch('/api/check-ins', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -571,10 +606,6 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       ...prev,
       checkIns: [saved, ...prev.checkIns],
     }));
-
-    if (isFirebaseConfigured && firestoreDb) {
-      setDoc(doc(firestoreDb, 'checkIns', saved.id), saved).catch(() => {});
-    }
     return saved;
   };
 
@@ -585,13 +616,10 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     source: EntitlementSource;
     durationDays?: number;
   }): Promise<Entitlement> => {
-    const res = await fetch('/api/entitlements', {
+    const res = await authFetch('/api/entitlements', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        actorRole: currentUser?.role === 'admin' ? 'admin' : 'coach',
-        ...params,
-      }),
+      body: JSON.stringify(params),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -625,6 +653,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         e.id === entitlementId ? { ...e, isActive: false } : e
       ),
     }));
+    void authFetch(`/api/entitlements?id=${encodeURIComponent(entitlementId)}`, {
+      method: 'DELETE',
+    });
   };
 
   const updateAthleteProfileCoach = (userId: string, patch: Partial<AthleteProfile>) => {
@@ -634,6 +665,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         p.userId === userId ? { ...p, ...patch, updatedAt: new Date().toISOString() } : p
       ),
     }));
+    void authFetch('/api/athlete/profile', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, ...patch }),
+    });
   };
 
   const createOrUpdatePlan = (plan: TrainingPlan) => {
@@ -646,6 +682,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
           : [plan, ...prev.trainingPlans],
       };
     });
+    void authFetch('/api/plans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(plan),
+    });
   };
 
   const updateFeatureFlags = (patch: Partial<PlatformFeatureFlags>) => {
@@ -654,10 +695,18 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
     setFeatureFlags((prev) => {
       const next = { ...prev, ...patch };
-      try {
-        window.localStorage.setItem(FLAGS_KEY, JSON.stringify(next));
-      } catch {
-        // ignore
+      if (isFirebaseConfigured) {
+        void authFetch('/api/admin/config', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ featureFlags: next }),
+        });
+      } else {
+        try {
+          window.localStorage.setItem(FLAGS_KEY, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
       }
       return next;
     });
@@ -675,7 +724,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       throw new Error("La vente publique de programmes d'entraînement n'est pas encore activée par l'administrateur.");
     }
 
-    const res = await fetch('/api/orders/checkout', {
+    const res = await authFetch('/api/orders/checkout', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -690,8 +739,12 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       throw new Error(data.error || 'Échec du traitement de commande.');
     }
 
+    if (data.mode === 'stripe' && data.checkoutUrl) {
+      window.location.href = data.checkoutUrl as string;
+    }
+
     const order = data.order as Order;
-    const ent = data.entitlement as Entitlement | null;
+    const ent = (data.entitlement || null) as Entitlement | null;
 
     setStore((prev) => ({
       ...prev,
@@ -713,9 +766,10 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   };
 
   const addCommunityPost = (post: Omit<CommunityPost, 'id' | 'likesCount' | 'createdAt'>) => {
+    const tempId = `post-${Date.now()}`;
     const created: CommunityPost = {
       ...post,
-      id: `post-${Date.now()}`,
+      id: tempId,
       likesCount: 0,
       createdAt: new Date().toISOString(),
     };
@@ -723,6 +777,33 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       ...prev,
       communityPosts: [created, ...prev.communityPosts],
     }));
+
+    void authFetch('/api/community/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: currentUser?.id || post.userId,
+        authorName: currentUser?.displayName || post.authorName,
+        type: post.type,
+        title: post.title,
+        content: post.content,
+        distanceKm: post.distanceKm,
+        elevationGainM: post.elevationGainM,
+        locationLabel: post.locationLabel,
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.post) {
+          setStore((prev) => ({
+            ...prev,
+            communityPosts: prev.communityPosts.map((p) =>
+              p.id === tempId ? (data.post as CommunityPost) : p
+            ),
+          }));
+        }
+      })
+      .catch(() => {});
   };
 
   const likeCommunityPost = (postId: string) => {
@@ -732,18 +813,69 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         p.id === postId ? { ...p, likesCount: p.likesCount + 1 } : p
       ),
     }));
+    void authFetch('/api/community/likes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ postId }),
+    });
   };
 
-  const saveRoadbook = (rb: RoadbookDoc) => {
-    setStore((prev) => {
-      const exists = prev.roadbooks.some((r) => r.id === rb.id);
-      return {
-        ...prev,
-        roadbooks: exists
-          ? prev.roadbooks.map((r) => (r.id === rb.id ? rb : r))
-          : [rb, ...prev.roadbooks],
+  const saveRoadbook = async (
+    rb: RoadbookDoc
+  ): Promise<{ ok: boolean; error?: string; roadbook: RoadbookDoc }> => {
+    const upsertLocal = (target: RoadbookDoc) => {
+      setStore((prev) => {
+        const exists = prev.roadbooks.some((r) => r.id === target.id);
+        return {
+          ...prev,
+          roadbooks: exists
+            ? prev.roadbooks.map((r) => (r.id === target.id ? target : r))
+            : [target, ...prev.roadbooks],
+        };
+      });
+    };
+
+    try {
+      const res = await authFetch('/api/roadbooks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(rb),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        roadbook?: RoadbookDoc;
       };
-    });
+
+      if (!res.ok) {
+        if (!isFirebaseConfigured && res.status === 401) {
+          upsertLocal(rb);
+          return { ok: true, roadbook: rb };
+        }
+        return {
+          ok: false,
+          error: data.error || 'Erreur lors de la sauvegarde du roadbook.',
+          roadbook: rb,
+        };
+      }
+
+      const saved = data.roadbook ? { ...rb, ...data.roadbook } : rb;
+      upsertLocal(saved);
+      return { ok: true, roadbook: saved };
+    } catch (err: unknown) {
+      if (!isFirebaseConfigured) {
+        upsertLocal(rb);
+        return { ok: true, roadbook: rb };
+      }
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Impossible de joindre le serveur pour sauvegarder.',
+        roadbook: rb,
+      };
+    }
   };
 
   const submitCoachingInquiry = async (
@@ -802,7 +934,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       if (existing) return existing;
     }
 
-    const res = await fetch('/api/chat/rooms', {
+    const res = await authFetch('/api/chat/rooms', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -821,9 +953,6 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       ...prev,
       chatRooms: [room, ...prev.chatRooms],
     }));
-    if (isFirebaseConfigured && firestoreDb) {
-      setDoc(doc(firestoreDb, 'chatRooms', room.id), room).catch(() => {});
-    }
     return room;
   };
 
@@ -856,7 +985,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       throw new Error('Seul le coach peut publier dans ce canal d’annonces.');
     }
 
-    const res = await fetch('/api/chat/messages', {
+    const res = await authFetch('/api/chat/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -896,10 +1025,6 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       }),
     }));
-
-    if (isFirebaseConfigured && firestoreDb) {
-      setDoc(doc(firestoreDb, 'chatMessages', msg.id), msg).catch(() => {});
-    }
     return msg;
   };
 
@@ -946,12 +1071,24 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         };
       }),
     }));
+    void authFetch('/api/chat/rooms', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId,
+        action: 'update',
+        ...patch,
+      }),
+    });
   };
 
   const leaveOrDeleteChatRoom = (roomId: string) => {
     if (!currentUser) return;
     const uid = currentUser.id;
     const isCoachOrAdmin = currentUser.role === 'coach' || currentUser.role === 'admin';
+    const targetRoom = store.chatRooms.find((r) => r.id === roomId);
+    if (!targetRoom || targetRoom.type === 'direct') return;
+
     setStore((prev) => {
       const room = prev.chatRooms.find((r) => r.id === roomId);
       if (!room || room.type === 'direct') return prev;
@@ -969,6 +1106,23 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         ),
       };
     });
+
+    const isOwnerOrCoach = isCoachOrAdmin || targetRoom.createdBy === uid;
+    if (isOwnerOrCoach) {
+      void authFetch(`/api/chat/rooms?id=${encodeURIComponent(roomId)}`, {
+        method: 'DELETE',
+      });
+    } else {
+      void authFetch('/api/chat/rooms', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomId,
+          action: 'update',
+          memberIds: targetRoom.memberIds.filter((id) => id !== uid),
+        }),
+      });
+    }
   };
 
   const exportUserDataRgpd = async () => {
@@ -987,7 +1141,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       chatMessages: store.chatMessages.filter((m) => m.senderId === uid),
     };
 
-    const res = await fetch('/api/rgpd/export', {
+    const res = await authFetch('/api/rgpd/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1009,13 +1163,20 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const deleteAccountDataRgpd = async () => {
     if (!currentUser) return;
     const uid = currentUser.id;
+    const res = await authFetch('/api/rgpd/account', {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error || 'Échec de la suppression du compte.');
+    }
     setStore((prev) => ({
       ...prev,
       users: prev.users.filter((u) => u.id !== uid),
       athleteProfiles: prev.athleteProfiles.filter((p) => p.userId !== uid),
       intervalsConnections: prev.intervalsConnections.filter((c) => c.userId !== uid),
       intervalsSnapshots: prev.intervalsSnapshots.filter((s) => s.userId !== uid),
-      checkIns: prev.checkIns.filter((c) => c.userId === uid ? false : true),
+      checkIns: prev.checkIns.filter((c) => c.userId !== uid),
       entitlements: prev.entitlements.filter((e) => e.userId !== uid),
       roadbooks: prev.roadbooks.filter((r) => r.userId !== uid),
       chatMessages: prev.chatMessages.filter((m) => m.senderId !== uid),
@@ -1043,6 +1204,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     signInWithEmail,
     signUpWithEmail,
     signInWithGoogle,
+    sendPasswordReset,
     logoutUser,
     resetDemoData,
     updatePromoBanner,

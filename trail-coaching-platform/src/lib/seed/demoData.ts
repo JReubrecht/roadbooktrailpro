@@ -19,7 +19,7 @@ import { getSampleAlpineTrailTrace } from '@/lib/trail/roadbook';
 export interface PlatformStoreState {
   users: UserDoc[];
   athleteProfiles: AthleteProfile[];
-  intervalsConnections: Array<IntervalsConnectionPublic & { secretEncrypted?: string }>;
+  intervalsConnections: IntervalsConnectionPublic[];
   intervalsSnapshots: IntervalsSnapshot[];
   checkIns: CheckIn[];
   trainingPlans: TrainingPlan[];
@@ -184,7 +184,7 @@ export function createInitialDemoState(): PlatformStoreState {
     },
   ];
 
-  const intervalsConnections: Array<IntervalsConnectionPublic & { secretEncrypted?: string }> = [
+  const intervalsConnections: IntervalsConnectionPublic[] = [
     {
       userId: 'pilot-claire',
       intervalsAthleteId: 'i412890',

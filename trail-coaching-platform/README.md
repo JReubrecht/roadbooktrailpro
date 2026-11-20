@@ -91,3 +91,22 @@ Ce nouveau projet est conçu pour **remplacer progressivement et sans coupure** 
    - Rediriger le DNS du domaine principal vers le déploiement de `trail-coaching-platform`.
 4. **Phase 4 — Archivage de l'existant** :
    - Conserver l'ancien projet (`apps/web` + `apps/plan-builder`) en archive en lecture seule / référence historique.
+
+## Mise en production P0 (Firestore réel, JWT & Sécurité)
+
+1. Copiez `.env.example` vers `.env.local` et renseignez :
+   - Les variables `NEXT_PUBLIC_FIREBASE_*` (SDK client Firebase)
+   - `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` (compte de service Firebase Admin)
+   - `ADMIN_EMAILS` (et optionnellement `NEXT_PUBLIC_ADMIN_EMAILS`) avec l’email du coach administrateur
+   - `INTERVALS_ENCRYPTION_KEY` (`openssl rand -hex 32` — obligatoire lorsque `NODE_ENV=production`)
+   - Optionnel : `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `COACH_NOTIFICATION_EMAIL` pour les alertes email (nouveaux bilans & alertes douleur)
+   - Optionnel : `STRIPE_SECRET_KEY` pour les paiements réels (refusés sans Stripe en production)
+   - `NEXT_PUBLIC_ENABLE_DEMO_DOCK=false` (le dock multi-rôles et les raccourcis démo sont de toute façon désactivés dès que Firebase est actif ou en production)
+2. Déployez les règles de sécurité Firestore et Storage :
+   ```bash
+   firebase deploy --only firestore:rules,storage:rules
+   ```
+3. Connectez une première fois le compte coach via `/login`, ou initialisez la configuration globale + claims coach avec :
+   ```bash
+   node scripts/seed-coach-admin.mjs
+   ```

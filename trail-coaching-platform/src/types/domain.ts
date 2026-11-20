@@ -293,9 +293,20 @@ export interface RoadbookDoc {
   updatedAt: string;
 }
 
+export interface NutritionBrand {
+  id: string;
+  name: string;
+  tagline?: string;
+  websiteUrl?: string;
+  partnerUrl?: string;
+  partnerLabel?: string;
+  isPartner?: boolean;
+}
+
 export interface NutritionProduct {
   id: string;
   brand: string;
+  brandId?: string;
   name: string;
   type: 'Gel' | 'Drink' | 'Bar' | 'Puree' | 'Pill' | 'Solid';
   carbsG: number;
@@ -305,6 +316,7 @@ export interface NutritionProduct {
   waterMl?: number;
   weightG: number;
   description: string;
+  productUrl?: string;
 }
 
 export interface CoachAlert {

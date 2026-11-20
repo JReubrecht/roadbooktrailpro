@@ -3,8 +3,23 @@
 import React, { useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { Upload, Plus, Trash2, Download, Printer, Save, Lock } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  Lock,
+  Moon,
+  Plus,
+  Printer,
+  Save,
+  Sun,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
 import ElevationProfileSvg from '@/components/trail/ElevationProfileSvg';
+import NutritionSimulator from '@/components/trail/NutritionSimulator';
+import RoadbookNutritionPanel from '@/components/trail/RoadbookNutritionPanel';
 
 const TrailMap = dynamic(() => import('@/components/trail/TrailMap'), {
   ssr: false,
@@ -24,17 +39,26 @@ import {
   calculateKmEffort,
   deriveConfigFromITRA,
   estimateRaceTargetHours,
+  getRoadbookSolarSummary,
 } from '@/lib/trail/pacing';
 import {
+  evaluateCutoffMargin,
   formatDecimalHoursToHHMM,
   formatDurationMs,
+  formatMarginMinutes,
   formatPace,
   formatTimeIso,
+  formatTimeIsoWithDayOffset,
   generateRoadbookSegments,
   getSampleAlpineTrailTrace,
+  normalizeWaypointsForSave,
+  toDateTimeLocalValue,
 } from '@/lib/trail/roadbook';
 import { exportRoadbookToGpx, parseGpxXml } from '@/lib/trail/gpx';
-import { NUTRITION_CATALOG, calculateHourlyNutritionTargets } from '@/lib/trail/nutrition';
+import {
+  calculateHourlyNutritionTargets,
+  calculateSegmentNutritionCaddie,
+} from '@/lib/trail/nutrition';
 import { usePlatform } from '@/context/PlatformContext';
 import type {
   GpxPoint,
@@ -71,14 +95,20 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
     initialRoadbook?.pacingStrategy || 'regular'
   );
   const [startTimeIso, setStartTimeIso] = useState<string>(
-    initialRoadbook?.startTimeIso || '2026-06-27T06:00'
+    toDateTimeLocalValue(initialRoadbook?.startTimeIso) || '2026-06-27T06:00'
+  );
+  const [activeRoadbookId, setActiveRoadbookId] = useState<string>(
+    () => initialRoadbook?.id || `rb-${Date.now()}`
   );
   const [newWpName, setNewWpName] = useState('');
   const [newWpKm, setNewWpKm] = useState('15');
   const [newWpPause, setNewWpPause] = useState('4');
   const [gpxError, setGpxError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
   const [hoveredPoint, setHoveredPoint] = useState<GpxPoint | null>(null);
+  const [selectedNutritionSegId, setSelectedNutritionSegId] = useState<string | null>(null);
 
   const rawStats = useMemo(() => calculateTraceStats(points, 5, 1), [points]);
   const distFactor = useMemo(() => {
@@ -154,45 +184,42 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
     [calcDistKm, calcElePosM, calcItra, calcPausesMin]
   );
 
-  // Simulateur Nutrition
-  const [nutriHours, setNutriHours] = useState(6.5);
+  // Profil nutritionnel partagé (simulateur + caddie roadbook)
   const [nutriWeight, setNutriWeight] = useState(68);
-  const [nutriWeather, setNutriWeather] = useState<WeatherCondition>('modere');
   const [nutriGutLevel, setNutriGutLevel] = useState<'standard' | 'trained'>('standard');
-  const [selectedQty, setSelectedQty] = useState<Record<string, number>>({
-    maurten_drink_320: 3,
-    naak_bar: 4,
-    maurten_gel_100: 4,
-    saltstick_caps: 6,
-  });
 
-  const nutriTargets = useMemo(
+  const roadbookNutritionTargets = useMemo(
     () =>
       calculateHourlyNutritionTargets({
-        durationHours: nutriHours,
+        durationHours: Math.max(0.5, totalRaceMs / 3600000),
         weightKg: nutriWeight,
-        weather: nutriWeather,
+        weather,
         gutTrainedLevel: nutriGutLevel,
       }),
-    [nutriHours, nutriWeight, nutriWeather, nutriGutLevel]
+    [totalRaceMs, nutriWeight, weather, nutriGutLevel]
   );
 
-  const nutriPackTotals = useMemo(() => {
-    let carbsG = 0;
-    let sodiumMg = 0;
-    let weightG = 0;
-    for (const [id, qty] of Object.entries(selectedQty)) {
-      if (qty > 0) {
-        const prod = NUTRITION_CATALOG.find((p) => p.id === id);
-        if (prod) {
-          carbsG += prod.carbsG * qty;
-          sodiumMg += prod.sodiumMg * qty;
-          weightG += prod.weightG * qty;
-        }
-      }
-    }
-    return { carbsG, sodiumMg, weightG };
-  }, [selectedQty]);
+  const segmentCaddies = useMemo(
+    () =>
+      calculateSegmentNutritionCaddie(
+        segments,
+        roadbookNutritionTargets.carbsGPerHour,
+        roadbookNutritionTargets.sodiumMgPerHour
+      ),
+    [segments, roadbookNutritionTargets]
+  );
+
+  const solarSummary = useMemo(
+    () =>
+      getRoadbookSolarSummary({
+        startTimeIso,
+        endTimeIso: segments[segments.length - 1]?.arrivalSlowIso,
+        lat: points[0]?.lat,
+        lon: points[0]?.lon,
+        segments,
+      }),
+    [startTimeIso, segments, points]
+  );
 
   const handleUploadGpx = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setGpxError(null);
@@ -206,6 +233,7 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
       setWaypoints(parsed.waypoints);
       setOfficialDistKm(String(parsed.distanceKm));
       setOfficialEleM(String(parsed.elevationGainM));
+      setSelectedNutritionSegId(null);
     } catch (err: unknown) {
       setGpxError(err instanceof Error ? err.message : 'Erreur lecture GPX.');
     }
@@ -310,10 +338,35 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
     URL.revokeObjectURL(url);
   };
 
-  const handleSaveToAccount = () => {
-    if (!currentUser) return;
-    saveRoadbook({
-      id: initialRoadbook?.id || `rb-${Date.now()}`,
+  const handleSaveToAccount = async () => {
+    if (!currentUser || isSaving) return;
+    setSaveError(null);
+    setSaveSuccess(null);
+    setIsSaving(true);
+
+    const isCloningForeignTemplate =
+      Boolean(initialRoadbook) &&
+      activeRoadbookId === initialRoadbook?.id &&
+      initialRoadbook?.userId !== currentUser.id &&
+      currentUser.role !== 'coach' &&
+      currentUser.role !== 'admin';
+
+    const targetId = isCloningForeignTemplate ? `rb-${Date.now()}` : activeRoadbookId;
+    if (isCloningForeignTemplate) {
+      setActiveRoadbookId(targetId);
+    }
+
+    const cleanedWaypoints = normalizeWaypointsForSave(waypoints);
+    const effectiveStartTimeIso =
+      toDateTimeLocalValue(startTimeIso) ||
+      toDateTimeLocalValue(initialRoadbook?.startTimeIso) ||
+      '2026-06-27T06:00';
+    if (effectiveStartTimeIso !== startTimeIso) {
+      setStartTimeIso(effectiveStartTimeIso);
+    }
+
+    const result = await saveRoadbook({
+      id: targetId,
       userId: currentUser.id,
       name: raceName,
       officialDistanceKm: calibratedStats.distanceKm,
@@ -322,12 +375,25 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
       fatiguePercent,
       pacingStrategy,
       weather,
-      startTimeIso,
+      startTimeIso: effectiveStartTimeIso,
+      isPublic: isCloningForeignTemplate ? false : initialRoadbook?.isPublic,
       points,
-      waypoints,
+      waypoints: cleanedWaypoints,
       updatedAt: new Date().toISOString(),
     });
-    setSaveSuccess('Roadbook enregistré dans votre espace membre.');
+
+    setIsSaving(false);
+
+    if (!result.ok) {
+      setSaveError(result.error || 'Échec de la sauvegarde du roadbook.');
+      return;
+    }
+
+    setSaveSuccess(
+      isCloningForeignTemplate
+        ? 'Copie personnelle du roadbook enregistrée dans votre espace membre.'
+        : 'Roadbook enregistré dans votre espace membre.'
+    );
     setTimeout(() => setSaveSuccess(null), 4000);
   };
 
@@ -339,6 +405,11 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
           {mode === 'member' ? (
             <p className="font-mono text-[11px] uppercase tracking-wider text-slate-500">
               ÉDITEUR ROADBOOK · MEMBRE
+              {initialRoadbook && currentUser && initialRoadbook.userId === currentUser.id
+                ? ` · ENREGISTRÉ (${formatTimeIso(initialRoadbook.updatedAt)})`
+                : initialRoadbook && currentUser && initialRoadbook.userId !== currentUser.id
+                ? ' · MODÈLE PARTAGÉ (COPIE À LA SAUVEGARDE)'
+                : ''}
             </p>
           ) : (
             <p className="font-mono text-[11px] uppercase tracking-wider text-[#14C38E] font-semibold">
@@ -374,10 +445,11 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
             <button
               type="button"
               onClick={handleSaveToAccount}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer"
+              disabled={isSaving}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md bg-[#0F172A] hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-semibold cursor-pointer disabled:cursor-wait"
             >
               <Save size={14} />
-              <span>Sauvegarder cloud</span>
+              <span>{isSaving ? 'Sauvegarde...' : 'Sauvegarder cloud'}</span>
             </button>
           )}
         </div>
@@ -417,6 +489,11 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
           {gpxError}
         </div>
       )}
+      {saveError && (
+        <div className="p-3 rounded-md bg-red-50 border-l-2 border-red-600 text-xs font-semibold text-red-800">
+          {saveError}
+        </div>
+      )}
       {saveSuccess && (
         <div className="p-3 rounded-md bg-emerald-50 border-l-2 border-[#14C38E] text-xs font-semibold text-[#047857]">
           {saveSuccess}
@@ -449,9 +526,78 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
         <div className="p-4">
           <p className="font-mono text-[10px] uppercase tracking-wider text-slate-400">Arrivée Prévue</p>
           <p className="font-mono text-xl font-bold text-[#14C38E] tabular-nums mt-1">
-            {segments.length > 0 ? formatTimeIso(segments[segments.length - 1].arrivalFastIso) : '--:--'}
+            {segments.length > 0
+              ? formatTimeIsoWithDayOffset(
+                  segments[segments.length - 1].arrivalFastIso,
+                  startTimeIso
+                )
+              : '--:--'}
           </p>
-          <p className="font-mono text-xs text-slate-500">{waypoints.length} points</p>
+          <p className="font-mono text-xs text-slate-500">
+            {segments.length > 0 ? segments.length + 1 : waypoints.length} points
+          </p>
+        </div>
+      </div>
+
+      {/* Bandeau Solaire SunCalc */}
+      <div className="bg-white border border-slate-200 rounded-lg px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="flex flex-wrap items-center gap-4 font-mono tabular-nums text-[#0F172A]">
+          <span className="inline-flex items-center gap-1.5 font-semibold">
+            <Sun size={14} className="text-[#FF5A36]" />
+            <span>
+              Lever :{' '}
+              {!solarSummary.hasValidCoords
+                ? 'Trace sans GPS'
+                : !solarSummary.hasValidDate
+                ? '--:--'
+                : solarSummary.polarState === 'always_up'
+                ? 'Jour polaire'
+                : solarSummary.polarState === 'always_down'
+                ? 'Nuit polaire'
+                : solarSummary.sunriseIso
+                ? formatTimeIso(solarSummary.sunriseIso)
+                : '--:--'}
+            </span>
+          </span>
+          <span className="inline-flex items-center gap-1.5 font-semibold">
+            <Moon size={14} className="text-[#0F172A]" />
+            <span>
+              Coucher :{' '}
+              {!solarSummary.hasValidCoords
+                ? 'Trace sans GPS'
+                : !solarSummary.hasValidDate
+                ? '--:--'
+                : solarSummary.polarState === 'always_up'
+                ? 'Jour polaire'
+                : solarSummary.polarState === 'always_down'
+                ? 'Nuit polaire'
+                : solarSummary.sunsetIso
+                ? formatTimeIso(solarSummary.sunsetIso)
+                : '--:--'}
+            </span>
+          </span>
+          {solarSummary.spansMultipleDays && solarSummary.nextDaySunriseIso && (
+            <span className="text-slate-500">
+              Lever J+1 : {formatTimeIso(solarSummary.nextDaySunriseIso)}
+            </span>
+          )}
+        </div>
+
+        <div className="font-mono text-[11px] tabular-nums flex items-center gap-2">
+          {solarSummary.nightSegmentsCount > 0 ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#0F172A] text-white font-semibold">
+              <Moon size={12} />
+              <span>
+                Nuit SunCalc : {solarSummary.nightSegmentsCount} tronçon(s) ·{' '}
+                {solarSummary.nightDistanceKm} km · {formatDurationMs(solarSummary.nightDurationFastMs)}
+              </span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-slate-200 bg-[#F8FAFC] text-slate-600">
+              <Sun size={12} className="text-[#14C38E]" />
+              <span>Parcours 100 % diurne</span>
+            </span>
+          )}
         </div>
       </div>
 
@@ -632,6 +778,10 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
             <span>
               <span className="inline-block w-2.5 h-0.5 bg-[#14C38E] align-middle mr-1" /> Descente
             </span>
+            <span>
+              <span className="inline-block w-2.5 h-2.5 bg-[#0F172A]/20 border border-slate-300 align-middle mr-1" />{' '}
+              Nuit SunCalc
+            </span>
           </div>
         </div>
         <ElevationProfileSvg
@@ -654,66 +804,228 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
                 <th className="px-4 py-3 font-semibold text-right">Km-Eff</th>
                 <th className="px-4 py-3 font-semibold text-right">Durée</th>
                 <th className="px-4 py-3 font-semibold text-right">Passage (Cible / Prud.)</th>
+                <th className="px-4 py-3 font-semibold text-center">Soleil / Nuit</th>
+                <th className="px-4 py-3 font-semibold">Barrière horaire</th>
                 <th className="px-4 py-3 font-semibold text-right">Allure · VAM</th>
                 <th className="px-4 py-3 font-semibold text-right">Pause</th>
+                <th className="px-4 py-3 font-semibold text-right no-print">Nutrition</th>
                 <th className="px-3 py-3 no-print" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {segments.map((seg) => (
-                <tr key={seg.id} className="hover:bg-[#F8FAFC]">
-                  <td className="px-4 py-2.5 font-semibold text-[#0F172A]">
-                    {seg.from.name} &rarr; {seg.to.name}
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
-                    <span className="font-semibold text-[#0F172A]">{seg.distanceKm} km</span>{' '}
-                    <span className="text-slate-400">({seg.cumulDistanceKm})</span>
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
-                    <span className="text-[#FF5A36] font-semibold">+{seg.elevationPosM}</span>{' '}
-                    <span className="text-slate-400">-{seg.elevationNegM}</span>
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums text-slate-700">
-                    {seg.kmEffort}
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs font-semibold tabular-nums text-[#0F172A]">
-                    {formatDurationMs(seg.durationFastMs)}
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums">
-                    <span className="font-bold text-[#0F172A]">
-                      {formatTimeIso(seg.arrivalFastIso)}
-                    </span>{' '}
-                    <span className="text-slate-400">/ {formatTimeIso(seg.arrivalSlowIso)}</span>
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums text-slate-600">
-                    <span>{formatPace(seg.paceTargetMinPerKm)}</span>
-                    <span className="block text-[10px] text-slate-400">
-                      {seg.vamEstimate > 0 ? `VAM ${seg.vamEstimate} m/h` : 'Plat / desc.'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums text-slate-500">
-                    {seg.to.pauseMinutes ? `${seg.to.pauseMinutes}m` : '-'}
-                  </td>
-                  <td className="px-3 py-2.5 text-right no-print">
-                    {seg.to.type !== 'finish' && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setWaypoints((prev) => prev.filter((w) => w.id !== seg.to.id))
-                        }
-                        className="p-1 rounded text-slate-400 hover:text-red-600 cursor-pointer"
-                        title="Supprimer"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {segments.map((seg, segIdx) => {
+                const cutoffEval = evaluateCutoffMargin(
+                  seg.to.cutoffTimeIso,
+                  seg.arrivalFastIso,
+                  seg.arrivalSlowIso
+                );
+                const caddie = segmentCaddies[segIdx];
+                const isNight = seg.nightIntensity > 0.25;
+                const isTwilight = !isNight && seg.nightIntensity > 0;
+                const isNutritionSelected = selectedNutritionSegId === seg.id;
+
+                return (
+                  <tr key={seg.id} className="hover:bg-[#F8FAFC] align-top">
+                    <td className="px-4 py-2.5 font-semibold text-[#0F172A]">
+                      {seg.from.name} &rarr; {seg.to.name}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums whitespace-nowrap">
+                      <span className="font-semibold text-[#0F172A]">{seg.distanceKm} km</span>{' '}
+                      <span className="text-slate-400">({seg.cumulDistanceKm})</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums whitespace-nowrap">
+                      <span className="text-[#FF5A36] font-semibold">+{seg.elevationPosM}</span>{' '}
+                      <span className="text-slate-400">-{seg.elevationNegM}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums text-slate-700">
+                      {seg.kmEffort}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-xs font-semibold tabular-nums text-[#0F172A]">
+                      {formatDurationMs(seg.durationFastMs)}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums whitespace-nowrap">
+                      <span className="font-bold text-[#0F172A]">
+                        {formatTimeIsoWithDayOffset(seg.arrivalFastIso, startTimeIso)}
+                      </span>{' '}
+                      <span className="text-slate-400 block text-[11px]">
+                        Prud. {formatTimeIsoWithDayOffset(seg.arrivalSlowIso, startTimeIso)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-center whitespace-nowrap">
+                      {isNight ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#0F172A] text-white font-mono text-[10px] uppercase">
+                          <Moon size={10} />
+                          <span>Nuit</span>
+                        </span>
+                      ) : isTwilight ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-amber-200 bg-amber-50 text-amber-800 font-mono text-[10px] uppercase">
+                          <Sun size={10} />
+                          <span>Crépuscule</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 bg-[#F8FAFC] text-slate-600 font-mono text-[10px] uppercase">
+                          <Sun size={10} className="text-[#14C38E]" />
+                          <span>Jour</span>
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 font-mono text-xs tabular-nums min-w-[195px]">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="datetime-local"
+                          aria-label={`Barrière horaire ${seg.to.name}`}
+                          value={toDateTimeLocalValue(seg.to.cutoffTimeIso)}
+                          onChange={(e) =>
+                            handleUpdateWaypoint(seg.to.id, {
+                              cutoffTimeIso: e.target.value || undefined,
+                            })
+                          }
+                          className="w-full rounded border border-slate-300 px-1.5 py-1 text-[11px] font-mono bg-white text-[#0F172A]"
+                        />
+                        {seg.to.cutoffTimeIso ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleUpdateWaypoint(seg.to.id, { cutoffTimeIso: undefined })
+                            }
+                            aria-label={`Effacer barrière horaire ${seg.to.name}`}
+                            title="Effacer la barrière horaire"
+                            className="p-1 rounded border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-300 cursor-pointer no-print shrink-0"
+                          >
+                            <X size={11} />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const suggested = new Date(
+                                new Date(seg.arrivalSlowIso).getTime() + 30 * 60000
+                              ).toISOString();
+                              handleUpdateWaypoint(seg.to.id, {
+                                cutoffTimeIso: toDateTimeLocalValue(suggested),
+                              });
+                            }}
+                            title="Pré-remplir +30 min après passage prudent"
+                            className="px-1.5 py-1 rounded border border-slate-200 bg-[#F8FAFC] text-[10px] text-slate-600 hover:border-slate-400 cursor-pointer no-print shrink-0"
+                          >
+                            +30m
+                          </button>
+                        )}
+                      </div>
+                      {cutoffEval.status === 'invalid' && (
+                        <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-red-200 bg-red-50 text-red-700 text-[10px] font-semibold">
+                          <AlertTriangle size={10} />
+                          <span>BH invalide</span>
+                        </div>
+                      )}
+                      {cutoffEval.status === 'exceeded' && cutoffEval.marginFastMin !== null && (
+                        <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-red-200 bg-red-50 text-red-700 text-[10px] font-semibold">
+                          <AlertTriangle size={10} />
+                          <span>
+                            Alerte BH · Cible {formatMarginMinutes(cutoffEval.marginFastMin)}
+                          </span>
+                        </div>
+                      )}
+                      {cutoffEval.status === 'warning' &&
+                        cutoffEval.marginFastMin !== null &&
+                        cutoffEval.marginSlowMin !== null && (
+                          <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-200 bg-amber-50 text-amber-800 text-[10px] font-semibold">
+                            <AlertTriangle size={10} />
+                            <span>
+                              {cutoffEval.marginSlowMin < 0 ? 'Prudent dépassé' : 'Marge serrée'} ·{' '}
+                              {formatMarginMinutes(cutoffEval.marginFastMin)} /{' '}
+                              {formatMarginMinutes(cutoffEval.marginSlowMin)}
+                            </span>
+                          </div>
+                        )}
+                      {cutoffEval.status === 'ok' &&
+                        cutoffEval.marginFastMin !== null &&
+                        cutoffEval.marginSlowMin !== null && (
+                          <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#14C38E]/40 bg-emerald-50 text-[#047857] text-[10px] font-semibold">
+                            <CheckCircle2 size={10} />
+                            <span>
+                              Marge {formatMarginMinutes(cutoffEval.marginFastMin)} /{' '}
+                              {formatMarginMinutes(cutoffEval.marginSlowMin)}
+                            </span>
+                          </div>
+                        )}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums text-slate-600 whitespace-nowrap">
+                      <span>{formatPace(seg.paceTargetMinPerKm)}</span>
+                      <span className="block text-[10px] text-slate-400">
+                        {seg.vamEstimate > 0 ? `VAM ${seg.vamEstimate} m/h` : 'Plat / desc.'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-xs tabular-nums text-slate-500">
+                      {seg.to.pauseMinutes ? `${seg.to.pauseMinutes}m` : '-'}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-[11px] tabular-nums whitespace-nowrap no-print">
+                      {caddie && (
+                        <div className="space-y-1">
+                          <div
+                            className={
+                              caddie.plannedCarbsG >= caddie.targetCarbsG * 0.9
+                                ? 'text-[#047857] font-semibold'
+                                : caddie.items.length > 0
+                                ? 'text-[#FF5A36] font-semibold'
+                                : 'text-slate-400'
+                            }
+                          >
+                            {caddie.plannedCarbsG}/{caddie.targetCarbsG}g ·{' '}
+                            {caddie.plannedSodiumMg}/{caddie.targetSodiumMg}mg
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedNutritionSegId(seg.id);
+                              document
+                                .getElementById('roadbook-nutrition-panel')
+                                ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                            }}
+                            className={`px-2 py-0.5 rounded border text-[10px] uppercase cursor-pointer ${
+                              isNutritionSelected
+                                ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                                : 'bg-white text-[#0F172A] border-slate-300 hover:border-[#FF5A36]'
+                            }`}
+                          >
+                            {caddie.items.length > 0
+                              ? `Éditer (${caddie.items.length})`
+                              : 'Planifier'}
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-right no-print">
+                      {seg.to.type !== 'finish' && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveWaypoint(seg.to.id)}
+                          className="p-1 rounded text-slate-400 hover:text-red-600 cursor-pointer"
+                          title="Supprimer"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* Plan Nutrition par Ravitaillement / Tronçon */}
+      <RoadbookNutritionPanel
+        segments={segments}
+        caddies={segmentCaddies}
+        hourlyTargets={roadbookNutritionTargets}
+        selectedSegmentId={selectedNutritionSegId}
+        onSelectSegment={setSelectedNutritionSegId}
+        onUpdateWaypointNutrition={(waypointId, plannedNutrition) =>
+          handleUpdateWaypoint(waypointId, { plannedNutrition })
+        }
+      />
 
       {/* Calculateurs Km-Effort & Nutrition */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 no-print">
@@ -802,134 +1114,12 @@ export default function TrailToolsWorkspace({ mode, initialRoadbook }: TrailTool
           </div>
         </section>
 
-        <section
-          id="nutrition-sim"
-          className="bg-white rounded-lg border border-slate-200 p-6 space-y-5"
-        >
-          <div className="border-b border-slate-100 pb-3">
-            <p className="font-mono text-[10px] uppercase tracking-wider text-slate-400">
-              CALCULATEUR 02 · APPORTS &amp; ÉLECTROLYTES
-            </p>
-            <h3 className="text-lg font-bold text-[#0F172A] mt-0.5">
-              Simulateur Nutritionnel Trail
-            </h3>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div>
-              <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">Durée (h)</label>
-              <input
-                type="number"
-                step="0.5"
-                min={1}
-                max={48}
-                value={nutriHours}
-                onChange={(e) => setNutriHours(Number(e.target.value) || 2)}
-                className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm font-mono font-semibold"
-              />
-            </div>
-            <div>
-              <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">Poids (kg)</label>
-              <input
-                type="number"
-                min={40}
-                max={130}
-                value={nutriWeight}
-                onChange={(e) => setNutriWeight(Number(e.target.value) || 68)}
-                className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm font-mono font-semibold"
-              />
-            </div>
-            <div>
-              <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">Météo</label>
-              <select
-                value={nutriWeather}
-                onChange={(e) => setNutriWeather(e.target.value as WeatherCondition)}
-                className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-xs bg-white"
-              >
-                <option value="froid">Froid</option>
-                <option value="modere">Modérée</option>
-                <option value="chaud">Chaud</option>
-                <option value="tres_chaud">Canicule</option>
-              </select>
-            </div>
-            <div>
-              <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">Digestion</label>
-              <select
-                value={nutriGutLevel}
-                onChange={(e) => setNutriGutLevel(e.target.value as 'standard' | 'trained')}
-                className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-xs bg-white"
-              >
-                <option value="standard">Standard</option>
-                <option value="trained">Entraîné</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 border border-slate-200 rounded-md divide-x divide-slate-200 text-center bg-[#F8FAFC]">
-            <div className="p-3">
-              <p className="font-mono text-[10px] uppercase text-slate-500">Glucides / h</p>
-              <p className="font-mono text-lg font-bold text-[#FF5A36] tabular-nums">
-                {nutriTargets.carbsGPerHour} g
-              </p>
-              <p className="font-mono text-[10px] text-slate-400">Tot: {nutriTargets.totalCarbsG} g</p>
-            </div>
-            <div className="p-3">
-              <p className="font-mono text-[10px] uppercase text-slate-500">Eau / h</p>
-              <p className="font-mono text-lg font-bold text-[#0F172A] tabular-nums">
-                {nutriTargets.waterMlPerHour} ml
-              </p>
-              <p className="font-mono text-[10px] text-slate-400">Tot: {nutriTargets.totalWaterLiters} L</p>
-            </div>
-            <div className="p-3">
-              <p className="font-mono text-[10px] uppercase text-slate-500">Sodium / h</p>
-              <p className="font-mono text-lg font-bold text-[#14C38E] tabular-nums">
-                {nutriTargets.sodiumMgPerHour} mg
-              </p>
-              <p className="font-mono text-[10px] text-slate-400">Tot: {nutriTargets.totalSodiumMg} mg</p>
-            </div>
-          </div>
-
-          <div className="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-48 overflow-y-auto">
-            {NUTRITION_CATALOG.slice(0, 7).map((prod) => (
-              <div
-                key={prod.id}
-                className="flex items-center justify-between gap-2 px-3 py-2 text-xs"
-              >
-                <div>
-                  <span className="font-semibold text-[#0F172A]">
-                    {prod.brand} — {prod.name}
-                  </span>
-                  <span className="ml-2 font-mono text-[11px] text-slate-400">
-                    {prod.carbsG}g / {prod.sodiumMg}mg Na
-                  </span>
-                </div>
-                <input
-                  type="number"
-                  min={0}
-                  max={50}
-                  value={selectedQty[prod.id] || 0}
-                  onChange={(e) =>
-                    setSelectedQty((prev) => ({
-                      ...prev,
-                      [prod.id]: Math.max(0, Number(e.target.value) || 0),
-                    }))
-                  }
-                  className="w-14 rounded border border-slate-300 px-1.5 py-1 text-center font-mono font-semibold bg-white"
-                />
-              </div>
-            ))}
-          </div>
-
-          <div className="rounded-md bg-[#0F172A] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 font-mono text-xs tabular-nums">
-            <span>
-              SAC : <strong>{nutriPackTotals.carbsG}g</strong> glu (cible {nutriTargets.totalCarbsG}g) ·{' '}
-              <strong>{nutriPackTotals.sodiumMg}mg</strong> Na
-            </span>
-            <span className="text-[#14C38E] font-semibold">
-              MASSE {(nutriPackTotals.weightG / 1000).toFixed(2)} KG
-            </span>
-          </div>
-        </section>
+        <NutritionSimulator
+          weightKg={nutriWeight}
+          onWeightChange={setNutriWeight}
+          gutLevel={nutriGutLevel}
+          onGutLevelChange={setNutriGutLevel}
+        />
       </div>
     </div>
   );

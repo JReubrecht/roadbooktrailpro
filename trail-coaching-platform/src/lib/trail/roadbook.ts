@@ -38,6 +38,134 @@ export function formatTimeIso(dateStr: string): string {
   }
 }
 
+function hasCalendarRollover(iso: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(iso.trim());
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  return (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  );
+}
+
+export function toDateTimeLocalValue(iso?: string): string {
+  if (!iso || !iso.trim()) return '';
+  const trimmed = iso.trim();
+  if (hasCalendarRollover(trimmed)) return '';
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(trimmed)) {
+    return trimmed;
+  }
+  const d = new Date(trimmed);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
+
+export function formatTimeIsoWithDayOffset(
+  dateStr: string,
+  referenceStartIso?: string
+): string {
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '--:--';
+    const baseTime = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    if (!referenceStartIso) return baseTime;
+    const ref = new Date(referenceStartIso);
+    if (isNaN(ref.getTime())) return baseTime;
+    const startDayMs = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate()).getTime();
+    const targetDayMs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const dayDiff = Math.round((targetDayMs - startDayMs) / 86400000);
+    return dayDiff > 0 ? `${baseTime} (+${dayDiff}j)` : baseTime;
+  } catch {
+    return '--:--';
+  }
+}
+
+export interface CutoffEvaluation {
+  status: 'none' | 'invalid' | 'ok' | 'warning' | 'exceeded';
+  marginFastMin: number | null;
+  marginSlowMin: number | null;
+}
+
+export function evaluateCutoffMargin(
+  cutoffTimeIso: string | undefined,
+  arrivalFastIso: string,
+  arrivalSlowIso: string
+): CutoffEvaluation {
+  if (!cutoffTimeIso || !cutoffTimeIso.trim()) {
+    return { status: 'none', marginFastMin: null, marginSlowMin: null };
+  }
+  if (hasCalendarRollover(cutoffTimeIso)) {
+    return { status: 'invalid', marginFastMin: null, marginSlowMin: null };
+  }
+  const cutoffMs = new Date(cutoffTimeIso).getTime();
+  const fastMs = new Date(arrivalFastIso).getTime();
+  const slowMs = new Date(arrivalSlowIso).getTime();
+  if (isNaN(cutoffMs) || isNaN(fastMs) || isNaN(slowMs)) {
+    return { status: 'invalid', marginFastMin: null, marginSlowMin: null };
+  }
+  const rawFastMs = cutoffMs - fastMs;
+  const rawSlowMs = cutoffMs - slowMs;
+  const flooredFast = Math.floor(rawFastMs / 60000);
+  const flooredSlow = Math.floor(rawSlowMs / 60000);
+  const marginFastMin = flooredFast === 0 ? 0 : flooredFast;
+  const marginSlowMin = flooredSlow === 0 ? 0 : flooredSlow;
+
+  let status: CutoffEvaluation['status'] = 'ok';
+  if (rawFastMs < 0) {
+    status = 'exceeded';
+  } else if (rawSlowMs < 0 || rawFastMs < 15 * 60000) {
+    status = 'warning';
+  }
+
+  return { status, marginFastMin, marginSlowMin };
+}
+
+export function formatMarginMinutes(marginMin: number): string {
+  const rounded = Math.round(marginMin);
+  const normalized = rounded === 0 ? 0 : rounded;
+  const sign = normalized >= 0 ? '+' : '-';
+  const abs = Math.abs(normalized);
+  if (abs < 60) return `${sign}${abs} min`;
+  const h = Math.floor(abs / 60);
+  const m = abs % 60;
+  return `${sign}${h}h${m.toString().padStart(2, '0')}`;
+}
+
+export function normalizeWaypointsForSave(waypoints: RoadbookWaypoint[]): RoadbookWaypoint[] {
+  return waypoints.map((wp) => {
+    const cleaned: RoadbookWaypoint = { ...wp };
+    if (!cleaned.cutoffTimeIso || !cleaned.cutoffTimeIso.trim()) {
+      delete cleaned.cutoffTimeIso;
+    } else {
+      cleaned.cutoffTimeIso = cleaned.cutoffTimeIso.trim();
+    }
+
+    if (cleaned.plannedNutrition) {
+      const nextNutrition: Record<string, number> = {};
+      for (const [prodId, rawQty] of Object.entries(cleaned.plannedNutrition)) {
+        const qty = Number.isFinite(rawQty) ? Math.floor(rawQty) : 0;
+        if (qty > 0) {
+          nextNutrition[prodId] = qty;
+        }
+      }
+      if (Object.keys(nextNutrition).length > 0) {
+        cleaned.plannedNutrition = nextNutrition;
+      } else {
+        delete cleaned.plannedNutrition;
+      }
+    }
+
+    return cleaned;
+  });
+}
+
 export function formatPace(minPerKm: number): string {
   if (!minPerKm || !isFinite(minPerKm) || minPerKm <= 0) return "--'--\"";
   const mins = Math.floor(minPerKm);
@@ -200,18 +328,29 @@ export function generateRoadbookSegments(
     };
   });
 
-  const baseLat = points[0]?.lat || 45.92;
-  const baseLon = points[0]?.lon || 6.87;
+  const baseLat = points[0] && Number.isFinite(points[0].lat) ? points[0].lat : 45.92;
+  const baseLon = points[0] && Number.isFinite(points[0].lon) ? points[0].lon : 6.87;
 
   let cumulMsPass1 = startTimeMs;
   let totalPredictedMs = 0;
   let totalPauseMs = 0;
 
   for (const seg of segmentsBase) {
-    const nightIntens = getNightIntensity(new Date(cumulMsPass1 + seg.fatiguedMs / 2), baseLat, baseLon);
-    const nightCoeff = getNightCoefficient(nightIntens);
     const modifier = (seg.to.timeModifierPct || 100) / 100.0;
-    const segFinalMs = seg.fatiguedMs / modifier / (weatherCoeff * nightCoeff);
+    const basePass1Ms = seg.fatiguedMs / modifier / weatherCoeff;
+    const nightIntens0 = getNightIntensity(
+      new Date(cumulMsPass1 + basePass1Ms / 2),
+      baseLat,
+      baseLon
+    );
+    const estPass1Ms = basePass1Ms / getNightCoefficient(nightIntens0);
+    const nightIntens = getNightIntensity(
+      new Date(cumulMsPass1 + estPass1Ms / 2),
+      baseLat,
+      baseLon
+    );
+    const nightCoeff = getNightCoefficient(nightIntens);
+    const segFinalMs = basePass1Ms / nightCoeff;
     totalPredictedMs += segFinalMs;
 
     const pauseMs = (seg.to.pauseMinutes || 0) * 60000;
@@ -248,22 +387,37 @@ export function generateRoadbookSegments(
   let cumulMsSlow = startTimeMs;
 
   return segmentsBase.map((seg, i) => {
+    const modifier = (seg.to.timeModifierPct || 100) / 100.0;
+    const baseFastMs = (seg.fatiguedMs * fastRatio) / modifier / weatherCoeff;
+    const nightIntensFast0 = getNightIntensity(
+      new Date(cumulMsFast + baseFastMs / 2),
+      baseLat,
+      baseLon
+    );
+    const estFastMs = baseFastMs / getNightCoefficient(nightIntensFast0);
     const nightIntensFast = getNightIntensity(
-      new Date(cumulMsFast + seg.fatiguedMs / 2),
+      new Date(cumulMsFast + estFastMs / 2),
       baseLat,
       baseLon
     );
     const nightCoeffFast = getNightCoefficient(nightIntensFast);
+
+    const baseSlowMs = (seg.fatiguedMs * slowRatio) / modifier / weatherCoeff;
+    const nightIntensSlow0 = getNightIntensity(
+      new Date(cumulMsSlow + baseSlowMs / 2),
+      baseLat,
+      baseLon
+    );
+    const estSlowMs = baseSlowMs / getNightCoefficient(nightIntensSlow0);
     const nightIntensSlow = getNightIntensity(
-      new Date(cumulMsSlow + seg.fatiguedMs / 2),
+      new Date(cumulMsSlow + estSlowMs / 2),
       baseLat,
       baseLon
     );
     const nightCoeffSlow = getNightCoefficient(nightIntensSlow);
 
-    const modifier = (seg.to.timeModifierPct || 100) / 100.0;
-    const durationFastMs = (seg.fatiguedMs * fastRatio) / modifier / (weatherCoeff * nightCoeffFast);
-    const durationSlowMs = (seg.fatiguedMs * slowRatio) / modifier / (weatherCoeff * nightCoeffSlow);
+    const durationFastMs = baseFastMs / nightCoeffFast;
+    const durationSlowMs = baseSlowMs / nightCoeffSlow;
 
     cumulMsFast += durationFastMs;
     cumulMsSlow += durationSlowMs;

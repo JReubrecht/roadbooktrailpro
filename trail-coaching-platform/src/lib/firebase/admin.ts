@@ -111,7 +111,7 @@ export function deleteSandboxIntervalsSecret(userId: string): void {
 /**
  * Normalise les champs Firestore (Timestamp -> ISO string) pour sérialisation JSON sûre.
  */
-export function normalizeFirestoreDoc<T extends Record<string, unknown>>(
+export function normalizeFirestoreDoc<T>(
   data: Record<string, unknown>,
   docId?: string
 ): T {

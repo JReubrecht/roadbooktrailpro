@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import { ChevronUp, ChevronDown, SlidersHorizontal } from 'lucide-react';
+import { IS_DEMO_SANDBOX_ENABLED } from '@/config/brand';
 import { usePlatform, type DemoPersonaId } from '@/context/PlatformContext';
 
 const PERSONAS: Array<{ id: DemoPersonaId; label: string; short: string }> = [
@@ -14,10 +15,10 @@ const PERSONAS: Array<{ id: DemoPersonaId; label: string; short: string }> = [
 ];
 
 export default function RolePreviewDock() {
-  const { activePersonaId, switchPersona, isReady } = usePlatform();
+  const { activePersonaId, switchPersona, isReady, isFirebaseLive } = usePlatform();
   const [open, setOpen] = useState(false);
 
-  if (!isReady) return null;
+  if (!isReady || isFirebaseLive || !IS_DEMO_SANDBOX_ENABLED) return null;
 
   const active = PERSONAS.find((p) => p.id === activePersonaId) || {
     id: activePersonaId,

@@ -1,4 +1,5 @@
 import { getConfiguredAdminEmails } from '@/lib/auth/serverAuth';
+import type { CoachingInquiry } from '@/types/domain';
 
 function escapeHtml(text: string): string {
   return text
@@ -69,39 +70,43 @@ async function sendResendEmail(params: {
   }
 }
 
-export async function notifyCoachNewInquiry(inquiry: {
-  id: string;
-  fullName: string;
-  email: string;
-  targetRace?: string;
-  targetDate?: string;
-  goalType: string;
-  message: string;
-}): Promise<EmailSendResult> {
-  const raceLabel = inquiry.targetRace ? `${inquiry.targetRace}` : 'Non précisée';
-  const dateLabel = inquiry.targetDate ? ` (${inquiry.targetDate})` : '';
-  const subject = `[MyKairn] Nouvelle demande (${inquiry.goalType}) — ${inquiry.fullName}`;
+export async function notifyCoachNewInquiry(
+  inquiry: CoachingInquiry
+): Promise<EmailSendResult> {
+  const offerLabels: Record<CoachingInquiry['offerInterest'], string> = {
+    coaching_1to1: 'Coaching Individuel 1-to-1',
+    race_audit: 'Pack Stratégie Jour J & Roadbook (89 €)',
+    training_plan: 'Programme Trail Autonome',
+  };
+  const offerLabel = offerLabels[inquiry.offerInterest] || inquiry.offerInterest;
+  const subject = `[MyKairn] Nouvelle demande (${offerLabel}) — ${inquiry.name}`;
 
   const html = `
     <div style="font-family: Inter, system-ui, sans-serif; color: #0F172A; line-height: 1.6;">
       <h2 style="margin: 0 0 12px;">Nouvelle demande entrante</h2>
-      <p><strong>Athlète :</strong> ${escapeHtml(inquiry.fullName)} (${escapeHtml(inquiry.email)})</p>
-      <p><strong>Objectif :</strong> ${escapeHtml(inquiry.goalType)}</p>
-      <p><strong>Course cible :</strong> ${escapeHtml(raceLabel + dateLabel)}</p>
+      <p><strong>Athlète :</strong> ${escapeHtml(inquiry.name)} (${escapeHtml(inquiry.email)})</p>
+      <p><strong>Offre ciblée :</strong> ${escapeHtml(offerLabel)}</p>
+      ${
+        inquiry.weeklyHours
+          ? `<p><strong>Disponibilité :</strong> ${inquiry.weeklyHours} h/semaine</p>`
+          : ''
+      }
       <p><strong>Référence :</strong> <code>${escapeHtml(inquiry.id)}</code></p>
       <hr style="border: 0; border-top: 1px solid #E2E8F0; margin: 16px 0;" />
-      <p style="white-space: pre-wrap;">${escapeHtml(inquiry.message)}</p>
+      <p style="white-space: pre-wrap;">${escapeHtml(inquiry.goal)}</p>
     </div>
   `;
 
   const text = [
-    `Nouvelle demande entrante (${inquiry.goalType})`,
-    `Athlète : ${inquiry.fullName} <${inquiry.email}>`,
-    `Course cible : ${raceLabel}${dateLabel}`,
+    `Nouvelle demande entrante (${offerLabel})`,
+    `Athlète : ${inquiry.name} <${inquiry.email}>`,
+    inquiry.weeklyHours ? `Volume hebdo dispo : ${inquiry.weeklyHours}h` : '',
     `Réf : ${inquiry.id}`,
     '',
-    inquiry.message,
-  ].join('\n');
+    inquiry.goal,
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   return sendResendEmail({
     subject,
@@ -114,12 +119,13 @@ export async function notifyCoachNewInquiry(inquiry: {
 export async function notifyCoachPainAlert(params: {
   athleteName: string;
   athleteEmail?: string;
-  painNotes?: string;
-  fatigueScore: number;
-  rpe: number;
-  dateIso: string;
+  sensitiveArea?: string;
+  comment?: string;
+  fatigueLevel?: number;
+  rpe?: number;
+  checkInDate: string;
 }): Promise<EmailSendResult> {
-  const subject = `[MyKairn ALERTE DOULEUR] ${params.athleteName} — ${params.dateIso}`;
+  const subject = `[MyKairn ALERTE DOULEUR] ${params.athleteName} — ${params.checkInDate}`;
 
   const html = `
     <div style="font-family: Inter, system-ui, sans-serif; color: #0F172A; line-height: 1.6;">
@@ -127,20 +133,30 @@ export async function notifyCoachPainAlert(params: {
       <p><strong>Athlète :</strong> ${escapeHtml(params.athleteName)}${
         params.athleteEmail ? ` (${escapeHtml(params.athleteEmail)})` : ''
       }</p>
-      <p><strong>Date check-in :</strong> ${escapeHtml(params.dateIso)}</p>
-      <p><strong>Fatigue :</strong> ${params.fatigueScore}/10 · <strong>RPE :</strong> ${params.rpe}/10</p>
+      <p><strong>Date check-in :</strong> ${escapeHtml(params.checkInDate)}</p>
+      <p><strong>Fatigue :</strong> ${params.fatigueLevel ?? 'N/A'}/5 · <strong>RPE :</strong> ${
+        params.rpe ?? 'N/A'
+      }/10</p>
+      ${
+        params.sensitiveArea
+          ? `<p><strong>Zone sensible :</strong> ${escapeHtml(params.sensitiveArea)}</p>`
+          : ''
+      }
       <hr style="border: 0; border-top: 1px solid #E2E8F0; margin: 16px 0;" />
-      <p><strong>Détail signalé :</strong> ${escapeHtml(
-        params.painNotes || 'Douleur signalée sans précision.'
+      <p><strong>Commentaire :</strong> ${escapeHtml(
+        params.comment || 'Douleur signalée sans commentaire.'
       )}</p>
     </div>
   `;
 
   const text = [
     `ALERTE DOULEUR — ${params.athleteName}`,
-    `Date : ${params.dateIso} | Fatigue : ${params.fatigueScore}/10 | RPE : ${params.rpe}/10`,
-    `Notes : ${params.painNotes || 'Douleur signalée sans précision.'}`,
-  ].join('\n');
+    `Date : ${params.checkInDate} | Fatigue : ${params.fatigueLevel ?? 'N/A'}/5 | RPE : ${params.rpe ?? 'N/A'}/10`,
+    params.sensitiveArea ? `Zone : ${params.sensitiveArea}` : '',
+    `Commentaire : ${params.comment || 'Douleur signalée sans commentaire.'}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   return sendResendEmail({
     subject,

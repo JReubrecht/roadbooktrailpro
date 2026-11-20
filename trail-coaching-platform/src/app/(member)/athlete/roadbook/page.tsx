@@ -10,9 +10,14 @@ export default function MemberRoadbooksPage() {
 
   if (!currentUser) return null;
 
-  const memberRoadbooks = store.roadbooks.filter(
-    (r) => r.userId === currentUser.id || r.isPublic
-  );
+  const memberRoadbooks = store.roadbooks
+    .filter((r) => r.userId === currentUser.id || r.isPublic)
+    .sort((a, b) => {
+      const aOwn = a.userId === currentUser.id ? 1 : 0;
+      const bOwn = b.userId === currentUser.id ? 1 : 0;
+      if (aOwn !== bOwn) return bOwn - aOwn;
+      return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+    });
 
   const activeRoadbook =
     selectedRoadbookId === 'default'

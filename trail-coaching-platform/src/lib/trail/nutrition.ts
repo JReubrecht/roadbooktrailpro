@@ -1,9 +1,67 @@
-import type { NutritionProduct, RoadbookSegment, WeatherCondition } from '@/types/domain';
+import type {
+  NutritionBrand,
+  NutritionProduct,
+  RoadbookSegment,
+  WeatherCondition,
+} from '@/types/domain';
+
+export const NUTRITION_BRANDS: NutritionBrand[] = [
+  {
+    id: 'maurten',
+    name: 'Maurten',
+    tagline: 'Technologie hydrogel haute tolérance',
+  },
+  {
+    id: 'naak',
+    name: 'Näak',
+    tagline: 'Nutrition ultra-endurance & protéines',
+  },
+  {
+    id: 'tailwind',
+    name: 'Tailwind',
+    tagline: 'Boisson tout-en-un glucides & électrolytes',
+  },
+  {
+    id: 'precision',
+    name: 'Precision',
+    tagline: 'Calibrage précis glucides & sodium',
+  },
+  {
+    id: 'overstims',
+    name: 'Overstim.s',
+    tagline: 'Énergie progressive longue distance',
+  },
+  {
+    id: 'decathlon',
+    name: 'Decathlon',
+    tagline: 'Gamme trail accessible & éprouvée',
+  },
+  {
+    id: 'saltstick',
+    name: 'SaltStick',
+    tagline: 'Apport ciblé en électrolytes',
+  },
+  {
+    id: 'generique',
+    name: 'Générique',
+    tagline: 'Hydratation neutre de référence',
+  },
+];
+
+export const NUTRITION_PRODUCT_TYPE_LABELS: Record<NutritionProduct['type'], string> = {
+  Gel: 'Gel',
+  Drink: 'Boisson',
+  Bar: 'Barre',
+  Puree: 'Purée',
+  Pill: 'Gélule',
+  Solid: 'Solide',
+};
 
 export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'maurten_gel_100',
     brand: 'Maurten',
+    brandId: 'maurten',
     name: 'Gel 100',
     type: 'Gel',
     carbsG: 25,
@@ -15,6 +73,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'maurten_gel_100_caf',
     brand: 'Maurten',
+    brandId: 'maurten',
     name: 'Gel 100 Caf 100',
     type: 'Gel',
     carbsG: 25,
@@ -27,6 +86,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'maurten_drink_320',
     brand: 'Maurten',
+    brandId: 'maurten',
     name: 'Drink Mix 320',
     type: 'Drink',
     carbsG: 79,
@@ -39,6 +99,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'naak_bar',
     brand: 'Näak',
+    brandId: 'naak',
     name: 'Ultra Energy Bar',
     type: 'Bar',
     carbsG: 28,
@@ -50,6 +111,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'naak_puree',
     brand: 'Näak',
+    brandId: 'naak',
     name: 'Ultra Energy Puree',
     type: 'Puree',
     carbsG: 26,
@@ -61,6 +123,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'naak_drink',
     brand: 'Näak',
+    brandId: 'naak',
     name: 'Ultra Energy Drink Mix',
     type: 'Drink',
     carbsG: 55,
@@ -73,6 +136,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'tailwind_endurance',
     brand: 'Tailwind',
+    brandId: 'tailwind',
     name: 'Endurance Fuel (2 doses)',
     type: 'Drink',
     carbsG: 50,
@@ -85,6 +149,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'precision_gel_30',
     brand: 'Precision',
+    brandId: 'precision',
     name: 'PF 30 Gel',
     type: 'Gel',
     carbsG: 30,
@@ -96,6 +161,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'precision_ph1000',
     brand: 'Precision',
+    brandId: 'precision',
     name: 'PH 1000 Électrolytes',
     type: 'Drink',
     carbsG: 17,
@@ -108,6 +174,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'overstims_energix',
     brand: 'Overstim.s',
+    brandId: 'overstims',
     name: 'Gel Energix',
     type: 'Gel',
     carbsG: 19,
@@ -119,6 +186,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'decathlon_gel_plus',
     brand: 'Decathlon',
+    brandId: 'decathlon',
     name: 'Energy Gel+',
     type: 'Gel',
     carbsG: 30,
@@ -130,6 +198,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'saltstick_caps',
     brand: 'SaltStick',
+    brandId: 'saltstick',
     name: 'Capsule Electrolyte',
     type: 'Pill',
     carbsG: 0,
@@ -141,6 +210,7 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
   {
     id: 'eau_pure_500',
     brand: 'Générique',
+    brandId: 'generique',
     name: 'Eau Plate 500 ml',
     type: 'Drink',
     carbsG: 0,
@@ -151,6 +221,104 @@ export const NUTRITION_CATALOG: NutritionProduct[] = [
     description: 'Hydratation neutre.',
   },
 ];
+
+function slugifyBrand(name: string): string {
+  return name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+export function getNutritionBrandById(brandIdOrName: string): NutritionBrand | undefined {
+  const needle = brandIdOrName.trim().toLowerCase();
+  if (!needle) return undefined;
+  return NUTRITION_BRANDS.find(
+    (b) => b.id.toLowerCase() === needle || b.name.toLowerCase() === needle
+  );
+}
+
+export function resolveProductBrandId(product: NutritionProduct): string {
+  if (product.brandId) return product.brandId;
+  return getNutritionBrandById(product.brand)?.id || slugifyBrand(product.brand);
+}
+
+export function groupNutritionCatalogByBrand(
+  products: NutritionProduct[] = NUTRITION_CATALOG
+): Array<{ brand: NutritionBrand; products: NutritionProduct[] }> {
+  const grouped = new Map<string, { brand: NutritionBrand; products: NutritionProduct[] }>();
+
+  for (const brand of NUTRITION_BRANDS) {
+    grouped.set(brand.id, { brand, products: [] });
+  }
+
+  for (const product of products) {
+    const bId = resolveProductBrandId(product);
+    let entry = grouped.get(bId);
+    if (!entry) {
+      entry = {
+        brand: getNutritionBrandById(bId) || { id: bId, name: product.brand },
+        products: [],
+      };
+      grouped.set(bId, entry);
+    }
+    entry.products.push(product);
+  }
+
+  return Array.from(grouped.values()).filter((g) => g.products.length > 0);
+}
+
+export interface NutritionBagTotals {
+  carbsG: number;
+  sodiumMg: number;
+  weightG: number;
+  caloriesKcal: number;
+  waterMl: number;
+  totalUnits: number;
+  selectedByBrand: Record<string, number>;
+}
+
+export function calculateNutritionBagTotals(
+  selectedQty: Record<string, number>,
+  catalog: NutritionProduct[] = NUTRITION_CATALOG
+): NutritionBagTotals {
+  let carbsG = 0;
+  let sodiumMg = 0;
+  let weightG = 0;
+  let caloriesKcal = 0;
+  let waterMl = 0;
+  let totalUnits = 0;
+  const selectedByBrand: Record<string, number> = {};
+
+  for (const [productId, rawQty] of Object.entries(selectedQty)) {
+    const qty = Number.isFinite(rawQty) && rawQty > 0 ? Math.floor(rawQty) : 0;
+    if (qty <= 0) continue;
+
+    const product = catalog.find((p) => p.id === productId);
+    if (!product) continue;
+
+    carbsG += product.carbsG * qty;
+    sodiumMg += product.sodiumMg * qty;
+    weightG += product.weightG * qty;
+    caloriesKcal += product.caloriesKcal * qty;
+    waterMl += (product.waterMl || 0) * qty;
+    totalUnits += qty;
+
+    const bId = resolveProductBrandId(product);
+    selectedByBrand[bId] = (selectedByBrand[bId] || 0) + qty;
+  }
+
+  return {
+    carbsG,
+    sodiumMg,
+    weightG,
+    caloriesKcal,
+    waterMl,
+    totalUnits,
+    selectedByBrand,
+  };
+}
 
 export interface NutritionTargetPlan {
   carbsGPerHour: number;
@@ -231,32 +399,44 @@ export interface SegmentCaddieSummary {
   segmentTitle: string;
   durationHours: number;
   targetCarbsG: number;
+  targetSodiumMg: number;
   plannedCarbsG: number;
   plannedSodiumMg: number;
+  deltaCarbsG: number;
+  deltaSodiumMg: number;
+  plannedWaterMl: number;
+  plannedWeightG: number;
   items: Array<{ product: NutritionProduct; qty: number }>;
 }
 
 export function calculateSegmentNutritionCaddie(
   segments: RoadbookSegment[],
-  carbsGPerHour: number
+  carbsGPerHour: number,
+  sodiumMgPerHour: number = 0
 ): SegmentCaddieSummary[] {
   return segments.map((seg) => {
     const durationHours = seg.durationFastMs / 3600000;
     const targetCarbsG = Math.round(durationHours * carbsGPerHour);
+    const targetSodiumMg = Math.round(durationHours * sodiumMgPerHour);
     const planned = seg.to.plannedNutrition || {};
 
     const items: Array<{ product: NutritionProduct; qty: number }> = [];
     let plannedCarbsG = 0;
     let plannedSodiumMg = 0;
+    let plannedWaterMl = 0;
+    let plannedWeightG = 0;
 
-    for (const [productId, qty] of Object.entries(planned)) {
-      if (qty > 0) {
-        const product = NUTRITION_CATALOG.find((p) => p.id === productId);
-        if (product) {
-          items.push({ product, qty });
-          plannedCarbsG += product.carbsG * qty;
-          plannedSodiumMg += product.sodiumMg * qty;
-        }
+    for (const [productId, rawQty] of Object.entries(planned)) {
+      const qty = Number.isFinite(rawQty) && rawQty > 0 ? Math.floor(rawQty) : 0;
+      if (qty <= 0) continue;
+
+      const product = NUTRITION_CATALOG.find((p) => p.id === productId);
+      if (product) {
+        items.push({ product, qty });
+        plannedCarbsG += product.carbsG * qty;
+        plannedSodiumMg += product.sodiumMg * qty;
+        plannedWaterMl += (product.waterMl || 0) * qty;
+        plannedWeightG += product.weightG * qty;
       }
     }
 
@@ -265,8 +445,13 @@ export function calculateSegmentNutritionCaddie(
       segmentTitle: `${seg.from.name} → ${seg.to.name}`,
       durationHours: Number(durationHours.toFixed(2)),
       targetCarbsG,
+      targetSodiumMg,
       plannedCarbsG,
       plannedSodiumMg,
+      deltaCarbsG: plannedCarbsG - targetCarbsG,
+      deltaSodiumMg: plannedSodiumMg - targetSodiumMg,
+      plannedWaterMl,
+      plannedWeightG,
       items,
     };
   });

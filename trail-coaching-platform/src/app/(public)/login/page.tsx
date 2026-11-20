@@ -4,12 +4,21 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import BrandLogo from '@/components/brand/BrandLogo';
+import { IS_DEMO_SANDBOX_ENABLED } from '@/config/brand';
 import { usePlatform } from '@/context/PlatformContext';
 
 export default function LoginPage() {
   const router = useRouter();
-  const { store, isFirebaseLive, signInWithEmail, signUpWithEmail, signInWithGoogle, switchPersona } =
-    usePlatform();
+  const {
+    store,
+    isFirebaseLive,
+    signInWithEmail,
+    signUpWithEmail,
+    signInWithGoogle,
+    sendPasswordReset,
+    switchPersona,
+  } = usePlatform();
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
 
   const [mode, setMode] = useState<'login' | 'signup'>('login');
   const [email, setEmail] = useState('');
@@ -206,43 +215,80 @@ export default function LoginPage() {
         </form>
 
         {isFirebaseLive && (
-          <button
-            type="button"
-            onClick={handleGoogle}
-            disabled={loading}
-            className="w-full py-2.5 rounded-md border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-          >
-            Continuer avec Google
-          </button>
+          <div className="space-y-2.5">
+            <button
+              type="button"
+              onClick={handleGoogle}
+              disabled={loading}
+              className="w-full py-2.5 rounded-md border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+            >
+              Continuer avec Google
+            </button>
+            <div className="flex items-center justify-between pt-1">
+              <button
+                type="button"
+                disabled={loading || !email.trim()}
+                onClick={async () => {
+                  setError(null);
+                  setResetMessage(null);
+                  try {
+                    await sendPasswordReset(email);
+                    setResetMessage(
+                      `Email de réinitialisation envoyé à ${email.trim()}.`
+                    );
+                  } catch (err) {
+                    setError(
+                      err instanceof Error
+                        ? err.message
+                        : 'Impossible d’envoyer le lien de réinitialisation.'
+                    );
+                  }
+                }}
+                className="text-xs font-medium text-slate-500 hover:text-slate-900 underline underline-offset-2 disabled:opacity-40 cursor-pointer"
+              >
+                Mot de passe oublié ?
+              </button>
+              <span className="font-mono text-[10px] text-slate-400">
+                Saisissez votre email ci-dessus
+              </span>
+            </div>
+            {resetMessage && (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">
+                {resetMessage}
+              </p>
+            )}
+          </div>
         )}
 
-        <div className="pt-4 border-t border-slate-200 space-y-2">
-          <p className="font-mono text-[10px] uppercase tracking-wider text-slate-400">
-            Accès rapide environnement pilote
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                switchPersona('coach-admin-1');
-                router.push('/coach');
-              }}
-              className="py-2 px-3 rounded-md border border-slate-300 hover:border-[#0F172A] text-[#0F172A] text-xs font-semibold cursor-pointer"
-            >
-              Cockpit Coach
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                switchPersona('pilot-claire');
-                router.push('/athlete');
-              }}
-              className="py-2 px-3 rounded-md border border-slate-300 hover:border-[#14C38E] text-[#0F172A] text-xs font-semibold cursor-pointer"
-            >
-              Pilote (Claire)
-            </button>
+        {!isFirebaseLive && IS_DEMO_SANDBOX_ENABLED && (
+          <div className="pt-4 border-t border-slate-200 space-y-2">
+            <p className="font-mono text-[10px] uppercase tracking-wider text-slate-400">
+              Accès rapide environnement pilote
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  switchPersona('coach-admin-1');
+                  router.push('/coach');
+                }}
+                className="py-2 px-3 rounded-md border border-slate-300 hover:border-[#0F172A] text-[#0F172A] text-xs font-semibold cursor-pointer"
+              >
+                Cockpit Coach
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  switchPersona('pilot-claire');
+                  router.push('/athlete');
+                }}
+                className="py-2 px-3 rounded-md border border-slate-300 hover:border-[#14C38E] text-[#0F172A] text-xs font-semibold cursor-pointer"
+              >
+                Pilote (Claire)
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
