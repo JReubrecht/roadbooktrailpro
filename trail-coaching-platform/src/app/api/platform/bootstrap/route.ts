@@ -11,6 +11,7 @@ import {
   isFirebaseAdminConfigured,
   normalizeFirestoreDoc,
 } from '@/lib/firebase/admin';
+import { normalizeRoadbookFromFirestore } from '@/lib/firebase/roadbookAdapter';
 import type {
   AthleteProfile,
   ChatMessage,
@@ -28,12 +29,53 @@ import type {
   UserDoc,
 } from '@/types/domain';
 
+function normalizeUserDoc(
+  rawData: Record<string, unknown>,
+  docId: string
+): UserDoc {
+  const doc = normalizeFirestoreDoc<Record<string, unknown>>(rawData, docId);
+  const nowIso = new Date().toISOString();
+  const email = typeof doc.email === 'string' ? doc.email : '';
+  const displayName =
+    typeof doc.displayName === 'string' && doc.displayName.trim()
+      ? doc.displayName.trim()
+      : typeof doc.name === 'string' && doc.name.trim()
+      ? doc.name.trim()
+      : email.includes('@')
+      ? email.split('@')[0]
+      : 'Athlète MyKairn';
+  const role =
+    doc.role === 'admin' || doc.role === 'coach' || doc.role === 'athlete'
+      ? doc.role
+      : 'athlete';
+  const createdAt =
+    typeof doc.createdAt === 'string' && doc.createdAt ? doc.createdAt : nowIso;
+  const updatedAt =
+    typeof doc.updatedAt === 'string' && doc.updatedAt
+      ? doc.updatedAt
+      : createdAt;
+
+  return {
+    ...(doc as unknown as UserDoc),
+    id: String(doc.id || docId),
+    email,
+    displayName,
+    role,
+    createdAt,
+    updatedAt,
+  };
+}
+
 function sanitizePublicUser(user: UserDoc): UserDoc {
+  const isStaff = user.role === 'coach' || user.role === 'admin';
   return {
     id: user.id,
     email: '',
     displayName: user.displayName,
     role: user.role,
+    ...(isStaff && user.coachSpecialty ? { coachSpecialty: user.coachSpecialty } : {}),
+    ...(isStaff && user.coachBio ? { coachBio: user.coachBio } : {}),
+    ...(isStaff && user.coachActive !== undefined ? { coachActive: user.coachActive } : {}),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
@@ -54,6 +96,12 @@ function sanitizeIntervalsConnection(
     userId: String(doc.userId || docId),
     intervalsAthleteId: String(doc.intervalsAthleteId || ''),
     authMode: doc.authMode === 'oauth' ? 'oauth' : 'api_key',
+    connectionScope:
+      doc.connectionScope === 'coach' || doc.connectionScope === 'athlete'
+        ? doc.connectionScope
+        : undefined,
+    coachedAthletesCount:
+      typeof doc.coachedAthletesCount === 'number' ? doc.coachedAthletesCount : undefined,
     hasSecret: Boolean(doc.hasSecret || doc.secretEncrypted),
     syncStatus:
       doc.syncStatus === 'ok' ||
@@ -138,10 +186,10 @@ export async function GET(request: NextRequest) {
     );
 
     let roadbooks: RoadbookDoc[] = [];
-    if (session?.isCoachOrAdmin) {
+    if (session?.isAdmin) {
       const rbSnap = await adminDb.collection('roadbooks').get();
       roadbooks = rbSnap.docs.map((d) =>
-        normalizeFirestoreDoc<RoadbookDoc>(d.data(), d.id)
+        normalizeRoadbookFromFirestore(d.data(), d.id, 450)
       );
     } else if (session) {
       const [publicRbSnap, ownRbSnap] = await Promise.all([
@@ -150,7 +198,7 @@ export async function GET(request: NextRequest) {
       ]);
       const rbMap = new Map<string, RoadbookDoc>();
       for (const d of [...publicRbSnap.docs, ...ownRbSnap.docs]) {
-        rbMap.set(d.id, normalizeFirestoreDoc<RoadbookDoc>(d.data(), d.id));
+        rbMap.set(d.id, normalizeRoadbookFromFirestore(d.data(), d.id, 450));
       }
       roadbooks = Array.from(rbMap.values());
     } else {
@@ -159,7 +207,7 @@ export async function GET(request: NextRequest) {
         .where('isPublic', '==', true)
         .get();
       roadbooks = publicRbSnap.docs.map((d) =>
-        normalizeFirestoreDoc<RoadbookDoc>(d.data(), d.id)
+        normalizeRoadbookFromFirestore(d.data(), d.id, 450)
       );
     }
 
@@ -174,7 +222,7 @@ export async function GET(request: NextRequest) {
     let chatRooms: ChatRoom[] = [];
     let chatMessages: ChatMessage[] = [];
 
-    if (session?.isCoachOrAdmin) {
+    if (session?.isAdmin) {
       const [
         usersSnap,
         profilesSnap,
@@ -200,7 +248,7 @@ export async function GET(request: NextRequest) {
       ]);
 
       users = usersSnap.docs.map((d) =>
-        normalizeFirestoreDoc<UserDoc>(d.data(), d.id)
+        normalizeUserDoc(d.data(), d.id)
       );
       athleteProfiles = profilesSnap.docs.map((d) =>
         normalizeFirestoreDoc<AthleteProfile>(d.data(), d.id)
@@ -231,12 +279,167 @@ export async function GET(request: NextRequest) {
       chatMessages = msgsSnap.docs
         .map((d) => normalizeFirestoreDoc<ChatMessage>(d.data(), d.id))
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    } else if (session?.role === 'coach') {
+      const [
+        staffUsersSnap,
+        assignedProfilesSnap,
+        featuredProfilesSnap,
+        ownConnSnap,
+        inquiriesSnap,
+        roomsSnap,
+      ] = await Promise.all([
+        adminDb.collection('users').where('role', 'in', ['coach', 'admin']).get(),
+        adminDb
+          .collection('athleteProfiles')
+          .where('assignedCoachId', '==', session.uid)
+          .get(),
+        adminDb
+          .collection('athleteProfiles')
+          .where('isShowcaseFeatured', '==', true)
+          .get(),
+        adminDb.collection('intervalsConnections').doc(session.uid).get(),
+        adminDb.collection('coachingInquiries').get(),
+        adminDb
+          .collection('chatRooms')
+          .where('memberIds', 'array-contains', session.uid)
+          .get(),
+      ]);
+
+      const profileMap = new Map<string, AthleteProfile>();
+      const assignedAthleteIds: string[] = [];
+
+      for (const pDoc of assignedProfilesSnap.docs) {
+        const p = normalizeFirestoreDoc<AthleteProfile>(pDoc.data(), pDoc.id);
+        profileMap.set(p.userId, p);
+        assignedAthleteIds.push(p.userId);
+      }
+      for (const pDoc of featuredProfilesSnap.docs) {
+        if (!profileMap.has(pDoc.id)) {
+          const p = sanitizePublicProfile(
+            normalizeFirestoreDoc<AthleteProfile>(pDoc.data(), pDoc.id)
+          );
+          profileMap.set(p.userId, p);
+        }
+      }
+      athleteProfiles = Array.from(profileMap.values());
+
+      const userMap = new Map<string, UserDoc>();
+      for (const sDoc of staffUsersSnap.docs) {
+        const u = normalizeUserDoc(sDoc.data(), sDoc.id);
+        userMap.set(
+          u.id,
+          u.id === session.uid ? u : sanitizePublicUser(u)
+        );
+      }
+
+      chatRooms = roomsSnap.docs
+        .map((d) => normalizeFirestoreDoc<ChatRoom>(d.data(), d.id))
+        .sort((a, b) =>
+          (b.lastMessageAt || b.createdAt).localeCompare(a.lastMessageAt || a.createdAt)
+        );
+
+      const extraUserIds = new Set<string>(assignedAthleteIds);
+      for (const p of athleteProfiles) {
+        if (!userMap.has(p.userId)) extraUserIds.add(p.userId);
+      }
+      for (const r of chatRooms) {
+        for (const mId of r.memberIds || []) {
+          if (!userMap.has(mId)) extraUserIds.add(mId);
+        }
+      }
+
+      if (extraUserIds.size > 0) {
+        const extraSnaps = await Promise.all(
+          Array.from(extraUserIds).map((uid) =>
+            adminDb.collection('users').doc(uid).get()
+          )
+        );
+        for (const uDoc of extraSnaps) {
+          if (!uDoc.exists) continue;
+          const full = normalizeUserDoc(uDoc.data()!, uDoc.id);
+          userMap.set(
+            uDoc.id,
+            assignedAthleteIds.includes(uDoc.id) ? full : sanitizePublicUser(full)
+          );
+        }
+      }
+      users = Array.from(userMap.values());
+
+      if (ownConnSnap.exists) {
+        intervalsConnections = [
+          sanitizeIntervalsConnection(ownConnSnap.data()!, ownConnSnap.id),
+        ];
+      }
+
+      coachingInquiries = inquiriesSnap.docs
+        .map((d) => normalizeFirestoreDoc<CoachingInquiry>(d.data(), d.id))
+        .filter((inq) => !inq.assignedCoachId || inq.assignedCoachId === session.uid)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+      const scopedIds = Array.from(new Set([session.uid, ...assignedAthleteIds]));
+      if (scopedIds.length > 0) {
+        for (let i = 0; i < scopedIds.length; i += 25) {
+          const chunk = scopedIds.slice(i, i + 25);
+          const [ordSnap, entSnap, snapSnap, ciSnap, rbSnap] = await Promise.all([
+            adminDb.collection('orders').where('userId', 'in', chunk).get(),
+            adminDb.collection('entitlements').where('userId', 'in', chunk).get(),
+            adminDb
+              .collection('intervalsSnapshots')
+              .where('userId', 'in', chunk)
+              .get(),
+            adminDb.collection('checkIns').where('userId', 'in', chunk).get(),
+            adminDb.collection('roadbooks').where('userId', 'in', chunk).get(),
+          ]);
+
+          for (const d of ordSnap.docs) {
+            orders.push(normalizeFirestoreDoc<Order>(d.data(), d.id));
+          }
+          for (const d of entSnap.docs) {
+            entitlements.push(normalizeFirestoreDoc<Entitlement>(d.data(), d.id));
+          }
+          for (const d of snapSnap.docs) {
+            intervalsSnapshots.push(
+              normalizeFirestoreDoc<IntervalsSnapshot>(d.data(), d.id)
+            );
+          }
+          for (const d of ciSnap.docs) {
+            checkIns.push(normalizeFirestoreDoc<CheckIn>(d.data(), d.id));
+          }
+          for (const d of rbSnap.docs) {
+            const rb = normalizeRoadbookFromFirestore(d.data(), d.id, 450);
+            if (!roadbooks.some((r) => r.id === rb.id)) {
+              roadbooks.push(rb);
+            }
+          }
+        }
+        orders.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        intervalsSnapshots.sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt));
+        checkIns.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      }
+
+      if (chatRooms.length > 0) {
+        const roomIds = chatRooms.map((r) => r.id);
+        const messageDocs: ChatMessage[] = [];
+        for (let i = 0; i < roomIds.length; i += 25) {
+          const chunk = roomIds.slice(i, i + 25);
+          const msgSnap = await adminDb
+            .collection('chatMessages')
+            .where('roomId', 'in', chunk)
+            .get();
+          for (const md of msgSnap.docs) {
+            messageDocs.push(normalizeFirestoreDoc<ChatMessage>(md.data(), md.id));
+          }
+        }
+        chatMessages = messageDocs.sort((a, b) =>
+          a.createdAt.localeCompare(b.createdAt)
+        );
+      }
     } else if (session) {
       const [
         ownUserSnap,
         ownProfileSnap,
         featuredProfilesSnap,
-        coachUsersSnap,
+        staffUsersSnap,
         ordersSnap,
         entSnap,
         connSnap,
@@ -250,7 +453,7 @@ export async function GET(request: NextRequest) {
           .collection('athleteProfiles')
           .where('isShowcaseFeatured', '==', true)
           .get(),
-        adminDb.collection('users').where('role', '==', 'coach').get(),
+        adminDb.collection('users').where('role', 'in', ['coach', 'admin']).get(),
         adminDb.collection('orders').where('userId', '==', session.uid).get(),
         adminDb.collection('entitlements').where('userId', '==', session.uid).get(),
         adminDb.collection('intervalsConnections').doc(session.uid).get(),
@@ -269,26 +472,26 @@ export async function GET(request: NextRequest) {
       if (ownUserSnap.exists) {
         userMap.set(
           session.uid,
-          normalizeFirestoreDoc<UserDoc>(ownUserSnap.data()!, session.uid)
+          normalizeUserDoc(ownUserSnap.data()!, session.uid)
         );
       }
-      for (const cDoc of coachUsersSnap.docs) {
+      for (const cDoc of staffUsersSnap.docs) {
         if (!userMap.has(cDoc.id)) {
           userMap.set(
             cDoc.id,
-            sanitizePublicUser(normalizeFirestoreDoc<UserDoc>(cDoc.data(), cDoc.id))
+            sanitizePublicUser(normalizeUserDoc(cDoc.data(), cDoc.id))
           );
         }
       }
 
       const profileMap = new Map<string, AthleteProfile>();
+      let ownAssignedCoachId: string | undefined;
       if (ownProfileSnap.exists) {
-        profileMap.set(
-          session.uid,
-          sanitizePublicProfile(
-            normalizeFirestoreDoc<AthleteProfile>(ownProfileSnap.data()!, session.uid)
-          )
+        const ownProf = sanitizePublicProfile(
+          normalizeFirestoreDoc<AthleteProfile>(ownProfileSnap.data()!, session.uid)
         );
+        ownAssignedCoachId = ownProf.assignedCoachId;
+        profileMap.set(session.uid, ownProf);
       }
 
       const extraUserIdsToFetch = new Set<string>();
@@ -328,7 +531,7 @@ export async function GET(request: NextRequest) {
           if (uDoc.exists && !userMap.has(uDoc.id)) {
             userMap.set(
               uDoc.id,
-              sanitizePublicUser(normalizeFirestoreDoc<UserDoc>(uDoc.data()!, uDoc.id))
+              sanitizePublicUser(normalizeUserDoc(uDoc.data()!, uDoc.id))
             );
           }
         }
@@ -343,9 +546,21 @@ export async function GET(request: NextRequest) {
         normalizeFirestoreDoc<Entitlement>(d.data(), d.id)
       );
       if (connSnap.exists) {
-        intervalsConnections = [
-          sanitizeIntervalsConnection(connSnap.data()!, connSnap.id),
-        ];
+        intervalsConnections.push(
+          sanitizeIntervalsConnection(connSnap.data()!, connSnap.id)
+        );
+      }
+      if (ownAssignedCoachId && ownAssignedCoachId !== session.uid) {
+        const coachConnSnap = await adminDb
+          .collection('intervalsConnections')
+          .doc(ownAssignedCoachId)
+          .get();
+        if (coachConnSnap.exists) {
+          intervalsConnections.push({
+            ...sanitizeIntervalsConnection(coachConnSnap.data()!, coachConnSnap.id),
+            connectionScope: 'coach',
+          });
+        }
       }
       intervalsSnapshots = snapsSnap.docs
         .map((d) => normalizeFirestoreDoc<IntervalsSnapshot>(d.data(), d.id))
@@ -388,7 +603,7 @@ export async function GET(request: NextRequest) {
         users = userSnaps
           .filter((d) => d.exists)
           .map((d) =>
-            sanitizePublicUser(normalizeFirestoreDoc<UserDoc>(d.data()!, d.id))
+            sanitizePublicUser(normalizeUserDoc(d.data()!, d.id))
           );
       }
     }

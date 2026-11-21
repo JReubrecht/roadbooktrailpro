@@ -40,6 +40,7 @@ import type {
   Entitlement,
   GrantType,
   EntitlementSource,
+  IntervalsCoachedAthlete,
   IntervalsConnectionPublic,
   IntervalsSnapshot,
   Order,
@@ -47,9 +48,10 @@ import type {
   TierStatus,
   TrainingPlan,
   UserDoc,
+  UserRole,
 } from '@/types/domain';
 
-const STORAGE_KEY = 'mykairn_coach_platform_state_v1';
+const STORAGE_KEY = 'mykairn_coach_platform_state_v2';
 const PERSONA_KEY = 'mykairn_coach_active_persona_v1';
 const BANNER_KEY = 'mykairn_coach_promo_banner_v1';
 const FLAGS_KEY = 'mykairn_coach_feature_flags_v1';
@@ -76,6 +78,7 @@ export type DemoPersonaId =
   | 'pilot-claire'
   | 'pilot-thomas'
   | 'athlete-free-demo'
+  | 'coach-2'
   | 'coach-admin-1';
 
 interface PlatformContextValue {
@@ -110,15 +113,43 @@ interface PlatformContextValue {
   setCustomLogoDataUrl: (dataUrl: string | null) => void;
   updateFeatureFlags: (patch: Partial<PlatformFeatureFlags>) => void;
 
-  // Actions Métier Coach / Athlète
+  // Actions Métier Coach / Athlète & Multi-Coachs
   connectIntervalsAccount: (params: {
     userId: string;
     intervalsAthleteId: string;
     apiKey: string;
-    healthDataConsent: true;
-  }) => Promise<{ snapshot: IntervalsSnapshot | null; athleteName: string }>;
+    connectionScope?: 'coach' | 'athlete';
+    healthDataConsent?: boolean;
+  }) => Promise<{
+    snapshot: IntervalsSnapshot | null;
+    athleteName: string;
+    coachedAthletes?: IntervalsCoachedAthlete[];
+  }>;
   disconnectIntervalsAccount: (userId: string) => void;
   syncAthleteIntervals: (userId: string) => Promise<IntervalsSnapshot>;
+  fetchCoachIntervalsRoster: (coachId?: string) => Promise<{
+    source: 'live' | 'sandbox';
+    athletes: IntervalsCoachedAthlete[];
+  }>;
+  createCoachMember: (params: {
+    email: string;
+    displayName: string;
+    role: 'coach' | 'admin';
+    coachSpecialty?: string;
+    coachBio?: string;
+  }) => Promise<UserDoc>;
+  updateCoachMember: (
+    userId: string,
+    patch: {
+      displayName?: string;
+      role?: UserRole;
+      coachSpecialty?: string;
+      coachBio?: string;
+      coachActive?: boolean;
+    }
+  ) => Promise<void>;
+  removeCoachRole: (userId: string) => Promise<void>;
+  assignAthleteToCoach: (athleteUserId: string, coachId: string | null) => Promise<void>;
   submitCheckIn: (payload: Omit<CheckIn, 'id' | 'createdAt'>) => Promise<CheckIn>;
   grantEntitlement: (params: {
     userId: string;
@@ -435,6 +466,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updatePromoBanner = (banner: PromoBannerConfig) => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      throw new Error('Action réservée à l’administrateur principal.');
+    }
     setPromoBanner(banner);
     if (isFirebaseConfigured) {
       void authFetch('/api/admin/config', {
@@ -452,6 +486,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   };
 
   const setCustomLogoDataUrl = (dataUrl: string | null) => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      throw new Error('Action réservée à l’administrateur principal.');
+    }
     setCustomLogoUrlState(dataUrl);
     if (isFirebaseConfigured) {
       void authFetch('/api/admin/config', {
@@ -476,8 +513,10 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     userId: string;
     intervalsAthleteId: string;
     apiKey: string;
-    healthDataConsent: true;
+    connectionScope?: 'coach' | 'athlete';
+    healthDataConsent?: boolean;
   }) => {
+    const scope = params.connectionScope || 'athlete';
     const res = await authFetch('/api/intervals/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -486,6 +525,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         intervalsAthleteId: params.intervalsAthleteId,
         apiKey: params.apiKey,
         authMode: 'api_key',
+        connectionScope: scope,
         healthDataConsent: params.healthDataConsent,
       }),
     });
@@ -496,7 +536,10 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     }
 
     const conn = data.connection as IntervalsConnectionPublic;
-    const snap = data.snapshot as IntervalsSnapshot | null;
+    const snap = (data.snapshot || null) as IntervalsSnapshot | null;
+    const coachedAthletes = (data.coachedAthletes || undefined) as
+      | IntervalsCoachedAthlete[]
+      | undefined;
     const nowIso = new Date().toISOString();
 
     setStore((prev) => {
@@ -507,27 +550,47 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       const nextSnaps = snap
         ? [...prev.intervalsSnapshots.filter((s) => s.id !== snap.id), snap]
         : prev.intervalsSnapshots;
-      const nextUsers = prev.users.map((u) =>
-        u.id === params.userId
-          ? {
-              ...u,
-              consents: {
-                ...(u.consents || { marketingOptIn: false }),
-                healthDataConsentAt: nowIso,
-              },
-              updatedAt: nowIso,
-            }
-          : u
-      );
+      const nextProfiles =
+        scope === 'athlete'
+          ? prev.athleteProfiles.map((p) =>
+              p.userId === params.userId
+                ? {
+                    ...p,
+                    intervalsAthleteId: conn.intervalsAthleteId,
+                    updatedAt: nowIso,
+                  }
+                : p
+            )
+          : prev.athleteProfiles;
+      const nextUsers =
+        scope === 'athlete'
+          ? prev.users.map((u) =>
+              u.id === params.userId
+                ? {
+                    ...u,
+                    consents: {
+                      ...(u.consents || { marketingOptIn: false }),
+                      healthDataConsentAt: nowIso,
+                    },
+                    updatedAt: nowIso,
+                  }
+                : u
+            )
+          : prev.users;
       return {
         ...prev,
         intervalsConnections: nextConns,
         intervalsSnapshots: nextSnaps,
+        athleteProfiles: nextProfiles,
         users: nextUsers,
       };
     });
 
-    return { snapshot: snap, athleteName: data.verification?.athleteName || '' };
+    return {
+      snapshot: snap,
+      athleteName: data.verification?.athleteName || '',
+      coachedAthletes,
+    };
   };
 
   const disconnectIntervalsAccount = (userId: string) => {
@@ -543,14 +606,22 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   };
 
   const syncAthleteIntervals = async (userId: string): Promise<IntervalsSnapshot> => {
-    const conn = store.intervalsConnections.find((c) => c.userId === userId);
+    const profile = store.athleteProfiles.find((p) => p.userId === userId);
+    const athleteConn = store.intervalsConnections.find(
+      (c) => c.userId === userId && c.connectionScope !== 'coach'
+    );
+    const coachIdForSync = profile?.assignedCoachId || currentUser?.id;
+    const targetConnOwnerId =
+      athleteConn?.userId || coachIdForSync || userId;
+
     const res = await authFetch('/api/intervals/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userId,
-        intervalsAthleteId: conn?.intervalsAthleteId || '0',
-        demoMode: !isFirebaseConfigured && !conn,
+        intervalsAthleteId:
+          profile?.intervalsAthleteId || athleteConn?.intervalsAthleteId || '0',
+        demoMode: !isFirebaseConfigured,
       }),
     });
 
@@ -559,7 +630,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       setStore((prev) => ({
         ...prev,
         intervalsConnections: prev.intervalsConnections.map((c) =>
-          c.userId === userId
+          c.userId === targetConnOwnerId
             ? { ...c, syncStatus: 'error', lastErrorMessage: data.error }
             : c
         ),
@@ -570,6 +641,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     const snap = data.snapshot as IntervalsSnapshot;
     const syncedAt =
       data.lastSyncedAt || data.connectionStatus?.lastSyncAt || new Date().toISOString();
+    const resolvedConnId = data.syncedByCoachId || targetConnOwnerId;
     setStore((prev) => ({
       ...prev,
       intervalsSnapshots: [
@@ -577,7 +649,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         snap,
       ],
       intervalsConnections: prev.intervalsConnections.map((c) =>
-        c.userId === userId
+        c.userId === resolvedConnId
           ? {
               ...c,
               syncStatus: 'ok',
@@ -588,6 +660,153 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       ),
     }));
     return snap;
+  };
+
+  const fetchCoachIntervalsRoster = async (coachId?: string) => {
+    const query = coachId ? `?coachId=${encodeURIComponent(coachId)}` : '';
+    const res = await authFetch(`/api/intervals/coach-athletes${query}`);
+    const data = (await res.json()) as {
+      ok?: boolean;
+      error?: string;
+      source?: 'live' | 'sandbox';
+      athletes?: IntervalsCoachedAthlete[];
+    };
+    if (!res.ok) {
+      throw new Error(
+        data.error || 'Impossible de récupérer les athlètes Intervals.icu du coach.'
+      );
+    }
+    return {
+      source: (data.source || 'live') as 'live' | 'sandbox',
+      athletes: Array.isArray(data.athletes) ? data.athletes : [],
+    };
+  };
+
+  const createCoachMember = async (params: {
+    email: string;
+    displayName: string;
+    role: 'coach' | 'admin';
+    coachSpecialty?: string;
+    coachBio?: string;
+  }): Promise<UserDoc> => {
+    const res = await authFetch('/api/admin/coaches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string; coach?: UserDoc };
+    if (!res.ok || !data.coach) {
+      throw new Error(data.error || 'Impossible de créer ou promouvoir ce coach.');
+    }
+    const createdCoach = data.coach;
+    setStore((prev) => {
+      const exists = prev.users.some((u) => u.id === createdCoach.id);
+      return {
+        ...prev,
+        users: exists
+          ? prev.users.map((u) => (u.id === createdCoach.id ? createdCoach : u))
+          : [...prev.users, createdCoach],
+      };
+    });
+    return createdCoach;
+  };
+
+  const updateCoachMember = async (
+    userId: string,
+    patch: {
+      displayName?: string;
+      role?: UserRole;
+      coachSpecialty?: string;
+      coachBio?: string;
+      coachActive?: boolean;
+    }
+  ) => {
+    const res = await authFetch('/api/admin/coaches', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, ...patch }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string; coach?: UserDoc };
+    if (!res.ok) {
+      throw new Error(data.error || 'Impossible de mettre à jour ce coach.');
+    }
+    const nowIso = new Date().toISOString();
+    setStore((prev) => ({
+      ...prev,
+      users: prev.users.map((u) =>
+        u.id === userId
+          ? {
+              ...u,
+              ...(data.coach || patch),
+              updatedAt: nowIso,
+            }
+          : u
+      ),
+    }));
+  };
+
+  const removeCoachRole = async (userId: string) => {
+    const res = await authFetch(
+      `/api/admin/coaches?id=${encodeURIComponent(userId)}`,
+      { method: 'DELETE' }
+    );
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    if (!res.ok) {
+      throw new Error(data.error || 'Impossible de retirer ce coach.');
+    }
+    const nowIso = new Date().toISOString();
+    setStore((prev) => ({
+      ...prev,
+      users: prev.users.map((u) =>
+        u.id === userId
+          ? { ...u, role: 'athlete', coachActive: false, updatedAt: nowIso }
+          : u
+      ),
+      athleteProfiles: prev.athleteProfiles.map((p) =>
+        p.assignedCoachId === userId
+          ? { ...p, assignedCoachId: undefined, updatedAt: nowIso }
+          : p
+      ),
+    }));
+  };
+
+  const assignAthleteToCoach = async (
+    athleteUserId: string,
+    coachId: string | null
+  ) => {
+    const res = await authFetch('/api/athlete/profile', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: athleteUserId,
+        assignedCoachId: coachId,
+      }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    if (!res.ok) {
+      throw new Error(data.error || 'Impossible d’assigner ce coach.');
+    }
+    const nowIso = new Date().toISOString();
+    setStore((prev) => {
+      const exists = prev.athleteProfiles.some((p) => p.userId === athleteUserId);
+      const nextProfiles = exists
+        ? prev.athleteProfiles.map((p) =>
+            p.userId === athleteUserId
+              ? { ...p, assignedCoachId: coachId ?? undefined, updatedAt: nowIso }
+              : p
+          )
+        : [
+            ...prev.athleteProfiles,
+            {
+              userId: athleteUserId,
+              tierStatus: 'free' as TierStatus,
+              assignedCoachId: coachId ?? undefined,
+              isShowcaseFeatured: false,
+              updatedAt: nowIso,
+            },
+          ];
+      return { ...prev, athleteProfiles: nextProfiles };
+    });
   };
 
   const submitCheckIn = async (payload: Omit<CheckIn, 'id' | 'createdAt'>): Promise<CheckIn> => {
@@ -690,8 +909,8 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateFeatureFlags = (patch: Partial<PlatformFeatureFlags>) => {
-    if (!currentUser || (currentUser.role !== 'coach' && currentUser.role !== 'admin')) {
-      throw new Error('Action réservée aux administrateurs / coachs.');
+    if (!currentUser || currentUser.role !== 'admin') {
+      throw new Error('Action réservée à l’administrateur principal.');
     }
     setFeatureFlags((prev) => {
       const next = { ...prev, ...patch };
@@ -901,9 +1120,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const totalUnreadMessages = useMemo(() => {
     if (!currentUser) return 0;
     const uid = currentUser.id;
-    const isCoach = currentUser.role === 'coach' || currentUser.role === 'admin';
+    const isAdmin = currentUser.role === 'admin';
     return store.chatRooms.reduce((acc, room) => {
-      if (!isCoach && !room.memberIds.includes(uid)) return acc;
+      if (!isAdmin && !room.memberIds.includes(uid)) return acc;
       return acc + (room.unreadBy?.[uid] || 0);
     }, 0);
   }, [store.chatRooms, currentUser]);
@@ -1213,6 +1432,11 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     connectIntervalsAccount,
     disconnectIntervalsAccount,
     syncAthleteIntervals,
+    fetchCoachIntervalsRoster,
+    createCoachMember,
+    updateCoachMember,
+    removeCoachRole,
+    assignAthleteToCoach,
     submitCheckIn,
     grantEntitlement,
     revokeEntitlement,

@@ -12,8 +12,11 @@ rules_version = '2';
 //      - id: string (optional in payload; if present must equal userId, immutable)
 //      - email: string (required, valid email, 5..160 chars)
 //      - displayName: string (required, 1..100 chars)
-//      - role: string (required, enum: ['athlete', 'coach', 'admin']; 'athlete' only on self-create; immutable for non-coach/admin)
+//      - role: string (required, enum: ['athlete', 'coach', 'admin']; 'athlete' only on self-create; admin only to set/change)
 //      - consents: map (optional; keys: termsAcceptedAt, privacyAcceptedAt, healthDataConsentAt, marketingOptIn)
+//      - coachSpecialty: string (optional, 0..160 chars)
+//      - coachBio: string (optional, 0..600 chars)
+//      - coachActive: bool (optional; admin only to set/change)
 //      - createdAt: timestamp | ISO datetime string (required, immutable)
 //      - updatedAt: timestamp | ISO datetime string (required)
 //
@@ -21,8 +24,8 @@ rules_version = '2';
 //    Document ID: {userId} (Firebase Auth UID)
 //    Fields:
 //      - userId: string (required, must equal userId, immutable)
-//      - tierStatus: string (optional on create defaulting to 'free', enum: ['pilot_showcase', 'coaching_paid', 'plan_only', 'free']; coach/admin only to change)
-//      - isShowcaseFeatured: bool (optional on create defaulting to false; coach/admin only to set/change)
+//      - tierStatus: string (optional on create, enum: ['pilot_showcase', 'coaching_paid', 'plan_only', 'free']; coach/admin only to set/change)
+//      - isShowcaseFeatured: bool (optional on create; coach/admin only to set/change)
 //      - showcaseBio: string (optional, 0..500 chars)
 //      - showcaseQuote: string (optional, 0..400 chars)
 //      - showcaseGoalRace: string (optional, 0..200 chars)
@@ -34,6 +37,8 @@ rules_version = '2';
 //      - vmaKmh: number (optional, 6..30)
 //      - trailIndex: int (optional, 200..1000)
 //      - notesCoach: string (optional, 0..2000 chars; coach/admin only to create/update)
+//      - assignedCoachId: string (optional, 1..128 chars; admin only to assign to another coach or mutate)
+//      - intervalsAthleteId: string (optional, 0..64 chars; coach/admin only to set/mutate)
 //      - updatedAt: timestamp | ISO datetime string (required)
 //
 // 3. Collection: intervalsConnections
@@ -174,6 +179,7 @@ rules_version = '2';
 //       - weeklyHours: number (optional, 1..40)
 //       - rgpdConsent: bool (required, must be true)
 //       - marketingOptIn: bool (optional)
+//       - assignedCoachId: string (optional, 1..128 chars)
 //       - createdAt: timestamp | ISO datetime string (optional, immutable if set)
 //
 // 13. Collection: chatRooms
@@ -256,6 +262,12 @@ service cloud.firestore {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         (getUserRole() == 'coach' || getUserRole() == 'admin');
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getUserRole() == 'admin';
     }
 
     // ========================================================================
@@ -356,13 +368,27 @@ service cloud.firestore {
     }
 
     function isValidUser(data, userId) {
-      return data.keys().hasOnly(['id', 'email', 'displayName', 'role', 'consents', 'createdAt', 'updatedAt']) &&
+      return data.keys().hasOnly([
+          'id',
+          'email',
+          'displayName',
+          'role',
+          'consents',
+          'coachSpecialty',
+          'coachBio',
+          'coachActive',
+          'createdAt',
+          'updatedAt'
+        ]) &&
         data.keys().hasAll(['email', 'displayName', 'role', 'createdAt', 'updatedAt']) &&
         (!('id' in data) || (data.id is string && data.id == userId)) &&
         isValidEmail(data.email) &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
         data.role in ['athlete', 'coach', 'admin'] &&
         (!('consents' in data) || data.consents == null || isValidUserConsents(data.consents)) &&
+        isValidOptionalString(data, 'coachSpecialty', 0, 160) &&
+        isValidOptionalString(data, 'coachBio', 0, 600) &&
+        (!('coachActive' in data) || data.coachActive == null || data.coachActive is bool) &&
         isValidDateTime(data.createdAt) &&
         isValidDateTime(data.updatedAt);
     }
@@ -383,6 +409,8 @@ service cloud.firestore {
           'vmaKmh',
           'trailIndex',
           'notesCoach',
+          'assignedCoachId',
+          'intervalsAthleteId',
           'updatedAt'
         ]) &&
         data.keys().hasAll(['userId', 'updatedAt']) &&
@@ -400,6 +428,8 @@ service cloud.firestore {
         isValidOptionalNumberRange(data, 'vmaKmh', 6, 30) &&
         isValidOptionalIntRange(data, 'trailIndex', 200, 1000) &&
         isValidOptionalString(data, 'notesCoach', 0, 2000) &&
+        isValidOptionalString(data, 'assignedCoachId', 1, 128) &&
+        isValidOptionalString(data, 'intervalsAthleteId', 0, 64) &&
         isValidDateTime(data.updatedAt);
     }
 
@@ -677,6 +707,7 @@ service cloud.firestore {
           'weeklyHours',
           'rgpdConsent',
           'marketingOptIn',
+          'assignedCoachId',
           'createdAt'
         ]) &&
         data.keys().hasAll(['name', 'email', 'goal', 'rgpdConsent']) &&
@@ -688,6 +719,7 @@ service cloud.firestore {
         isValidOptionalNumberRange(data, 'weeklyHours', 1, 40) &&
         data.rgpdConsent is bool && data.rgpdConsent == true &&
         (!('marketingOptIn' in data) || data.marketingOptIn is bool) &&
+        isValidOptionalString(data, 'assignedCoachId', 1, 128) &&
         (!('createdAt' in data) || isValidDateTime(data.createdAt));
     }
 
@@ -845,21 +877,29 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if isOwner(userId) || isCoachOrAdmin();
 
-      // Prevent privilege escalation: self-creation can ONLY assign role 'athlete'
-      allow create: if isOwner(userId)
-        && request.resource.data.role == 'athlete'
-        && isValidUser(request.resource.data, userId);
+      // Prevent privilege escalation: self-creation can ONLY assign role 'athlete' without coachActive; admins may provision team accounts
+      allow create: if (
+        isAdmin() ||
+        (
+          isOwner(userId)
+          && request.resource.data.role == 'athlete'
+          && !('coachActive' in request.resource.data)
+        )
+      ) && isValidUser(request.resource.data, userId);
 
-      // Owners can update profile fields, but CANNOT mutate their own 'role'
+      // Owners can update profile fields, but CANNOT mutate 'role' or 'coachActive'; admins can manage all user fields
       allow update: if (
-        isCoachOrAdmin() ||
-        (isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']))
+        isAdmin() ||
+        (
+          isOwner(userId)
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'coachActive'])
+        )
       )
         && isValidUser(request.resource.data, userId)
         && request.resource.data.createdAt == resource.data.createdAt
         && (!('id' in resource.data) || request.resource.data.id == resource.data.id);
 
-      allow delete: if isOwner(userId) || isCoachOrAdmin();
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ========================================================================
@@ -871,23 +911,43 @@ service cloud.firestore {
         || isOwner(userId)
         || isCoachOrAdmin();
 
-      // Athlete self-creation restricted to free tier, non-featured, and no notesCoach
+      // Athletes cannot set privileged or coach-managed fields; coaches can only assign to themselves on create; admins can assign any coach
       allow create: if (
-        isCoachOrAdmin() ||
         (
+          isCoachOrAdmin()
+          && (
+            !('assignedCoachId' in request.resource.data)
+            || request.resource.data.assignedCoachId == null
+            || isAdmin()
+            || request.resource.data.assignedCoachId == request.auth.uid
+          )
+        ) || (
           isOwner(userId)
-          && request.resource.data.get('tierStatus', 'free') == 'free'
-          && request.resource.data.get('isShowcaseFeatured', false) == false
-          && !request.resource.data.keys().hasAny(['notesCoach'])
+          && !request.resource.data.keys().hasAny([
+            'tierStatus',
+            'isShowcaseFeatured',
+            'notesCoach',
+            'assignedCoachId',
+            'intervalsAthleteId'
+          ])
         )
       ) && isValidAthleteProfile(request.resource.data, userId);
 
-      // Athlete cannot escalate tierStatus, showcase flag, or edit private coach notes
+      // Only admins can mutate assignedCoachId; coaches can edit coach-managed fields; athletes cannot mutate privileged fields
       allow update: if (
-        isCoachOrAdmin() ||
+        isAdmin() ||
         (
+          isCoachOrAdmin()
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['assignedCoachId'])
+        ) || (
           isOwner(userId)
-          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['tierStatus', 'isShowcaseFeatured', 'notesCoach'])
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'tierStatus',
+            'isShowcaseFeatured',
+            'notesCoach',
+            'assignedCoachId',
+            'intervalsAthleteId'
+          ])
         )
       )
         && isValidAthleteProfile(request.resource.data, userId)
@@ -1202,8 +1262,8 @@ service cloud.firestore {
       // Lecture publique pour 'global' (bandeau, logo, feature flags) ; réservée aux coachs/admins sinon
       allow read: if configId == 'global' || isCoachOrAdmin();
 
-      // Création et mise à jour réservées aux coachs/admins avec validation stricte du schéma
-      allow create, update: if isCoachOrAdmin()
+      // Création et mise à jour réservées à l'administrateur principal avec validation stricte du schéma
+      allow create, update: if isAdmin()
         && isValidPlatformConfig(request.resource.data);
 
       // Suppression interdite pour préserver la configuration globale de la plateforme

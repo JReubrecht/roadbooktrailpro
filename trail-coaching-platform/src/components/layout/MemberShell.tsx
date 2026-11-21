@@ -23,6 +23,7 @@ import BrandLogo from '@/components/brand/BrandLogo';
 import { usePlatform } from '@/context/PlatformContext';
 
 const PAGE_LABELS: Array<{ prefix: string; title: string }> = [
+  { prefix: '/coach/team', title: 'Équipe Coachs & Intervals' },
   { prefix: '/coach/brand', title: 'Charte Graphique & Vitrine' },
   { prefix: '/coach/athletes/', title: 'Dossier Individuel Athlète' },
   { prefix: '/coach', title: 'Cockpit Coach & Alertes' },
@@ -68,7 +69,10 @@ export default function MemberShell({ children }: { children: React.ReactNode })
 
   const coachLinks = [
     { href: '/coach', label: 'Cockpit & Alertes', icon: ShieldCheck, exact: false },
-    { href: '/coach/brand', label: 'Charte, Logo & Vitrine', icon: Palette, exact: true },
+    { href: '/coach/team', label: 'Équipe Coachs & Intervals', icon: Users, exact: true },
+    ...(access.isAdmin
+      ? [{ href: '/coach/brand', label: 'Charte, Logo & Vitrine', icon: Palette, exact: true }]
+      : []),
   ];
 
   const isLinkActive = (href: string, exact?: boolean) => {

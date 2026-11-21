@@ -18,6 +18,9 @@ export interface UserDoc {
   email: string;
   displayName: string;
   role: UserRole;
+  coachSpecialty?: string;
+  coachBio?: string;
+  coachActive?: boolean;
   consents?: UserConsents;
   createdAt: string;
   updatedAt: string;
@@ -26,6 +29,8 @@ export interface UserDoc {
 export interface AthleteProfile {
   userId: string;
   tierStatus: TierStatus;
+  assignedCoachId?: string;
+  intervalsAthleteId?: string;
   isShowcaseFeatured: boolean;
   showcaseBio?: string;
   showcaseQuote?: string;
@@ -48,11 +53,22 @@ export interface IntervalsConnectionPublic {
   userId: string;
   intervalsAthleteId: string;
   authMode: IntervalsAuthMode;
+  connectionScope?: 'coach' | 'athlete';
+  coachedAthletesCount?: number;
   hasSecret: boolean;
   syncStatus: IntervalsSyncStatus;
   lastSyncedAt?: string;
   lastErrorMessage?: string;
   updatedAt: string;
+}
+
+export interface IntervalsCoachedAthlete {
+  intervalsAthleteId: string;
+  name: string;
+  email?: string;
+  ctl?: number;
+  atl?: number;
+  permission?: string;
 }
 
 export interface IntervalsConnectionServer extends IntervalsConnectionPublic {
@@ -201,6 +217,7 @@ export interface CoachingInquiry {
   offerInterest: 'coaching_1to1' | 'race_audit' | 'training_plan';
   goal: string;
   weeklyHours?: number;
+  assignedCoachId?: string;
   rgpdConsent: boolean;
   marketingOptIn: boolean;
   createdAt: string;

@@ -1,4 +1,13 @@
-import { cert, getApps, initializeApp, type App } from 'firebase-admin/app';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  applicationDefault,
+  cert,
+  getApps,
+  initializeApp,
+  type App,
+} from 'firebase-admin/app';
 import { getAuth, type Auth } from 'firebase-admin/auth';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 
@@ -30,11 +39,43 @@ function getFirebaseAdminPrivateKey(): string {
   return raw.replace(/\\n/g, '\n').trim();
 }
 
+function hasServiceAccountCredentials(): boolean {
+  return Boolean(getFirebaseAdminClientEmail() && getFirebaseAdminPrivateKey());
+}
+
+function getAdcCredentialsPath(): string {
+  const explicit = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  if (explicit) return explicit;
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    return path.join(
+      process.env.APPDATA,
+      'gcloud',
+      'application_default_credentials.json'
+    );
+  }
+  return path.join(
+    os.homedir(),
+    '.config',
+    'gcloud',
+    'application_default_credentials.json'
+  );
+}
+
+export function hasAdcCredentials(): boolean {
+  if (hasServiceAccountCredentials()) return false;
+  if (process.env.VERCEL === '1') return false;
+  const useAdc =
+    process.env.FIREBASE_USE_ADC?.trim().toLowerCase() === 'true' ||
+    Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim());
+  if (!useAdc) return false;
+  const adcPath = getAdcCredentialsPath();
+  return Boolean(adcPath && fs.existsSync(/*turbopackIgnore: true*/ adcPath));
+}
+
 export function isFirebaseAdminConfigured(): boolean {
   return Boolean(
     getFirebaseAdminProjectId() &&
-      getFirebaseAdminClientEmail() &&
-      getFirebaseAdminPrivateKey()
+      (hasServiceAccountCredentials() || hasAdcCredentials())
   );
 }
 
@@ -47,16 +88,22 @@ function ensureAdminSingletons(): AdminSingletons | null {
     return globalForFirebaseAdmin.__mykairnAdminSingletons;
   }
 
+  const projectId = getFirebaseAdminProjectId();
+  const credential = hasServiceAccountCredentials()
+    ? cert({
+        projectId,
+        clientEmail: getFirebaseAdminClientEmail(),
+        privateKey: getFirebaseAdminPrivateKey(),
+      })
+    : applicationDefault();
+
   const existingApps = getApps();
   const app =
     existingApps.length > 0
       ? existingApps[0]
       : initializeApp({
-          credential: cert({
-            projectId: getFirebaseAdminProjectId(),
-            clientEmail: getFirebaseAdminClientEmail(),
-            privateKey: getFirebaseAdminPrivateKey(),
-          }),
+          credential,
+          projectId,
         });
 
   const auth = getAuth(app);

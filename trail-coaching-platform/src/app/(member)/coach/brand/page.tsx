@@ -26,10 +26,10 @@ export default function CoachBrandManagerPage() {
   const [enabled, setEnabled] = useState(promoBanner.enabled);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
-  if (!currentUser || !access.canAccessCoachDashboard) {
+  if (!currentUser || !access.isAdmin) {
     return (
       <div className="max-w-xl mx-auto px-4 py-16 text-center space-y-3">
-        <h1 className="text-xl font-bold">Accès réservé au Coach / Admin</h1>
+        <h1 className="text-xl font-bold">Accès réservé à l’Administrateur principal</h1>
         <Link href="/coach" className="text-sm font-semibold text-[#FF5A36] underline">
           Retour
         </Link>

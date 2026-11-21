@@ -16,12 +16,20 @@ export default function AthleteSettingsPage() {
     deleteAccountDataRgpd,
   } = usePlatform();
 
+  const assignedCoach = currentProfile?.assignedCoachId
+    ? store.users.find((u) => u.id === currentProfile.assignedCoachId) || null
+    : null;
+  const coachConn = assignedCoach
+    ? store.intervalsConnections.find((c) => c.userId === assignedCoach.id) || null
+    : null;
   const existingConn = currentUser
-    ? store.intervalsConnections.find((c) => c.userId === currentUser.id)
+    ? store.intervalsConnections.find(
+        (c) => c.userId === currentUser.id && c.connectionScope !== 'coach'
+      )
     : undefined;
 
   const [intervalsAthleteId, setIntervalsAthleteId] = useState(
-    existingConn?.intervalsAthleteId || '0'
+    currentProfile?.intervalsAthleteId || existingConn?.intervalsAthleteId || '0'
   );
   const [apiKey, setApiKey] = useState('');
   const [healthConsent, setHealthConsent] = useState(
@@ -144,17 +152,55 @@ export default function AthleteSettingsPage() {
       <section className="bg-white rounded-lg border border-slate-200 p-6 space-y-4">
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-3">
           <div>
-            <h2 className="text-lg font-bold text-[#0F172A]">Liaison Intervals.icu (Serveur)</h2>
+            <h2 className="text-lg font-bold text-[#0F172A]">
+              {assignedCoach
+                ? `Télémétrie gérée par votre coach (${assignedCoach.displayName})`
+                : 'Liaison Intervals.icu (Serveur)'}
+            </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Chiffrement AES-256-GCM côté serveur. Aucune clé API n&apos;est conservée en clair côté navigateur.
+              {assignedCoach
+                ? 'Votre coach accède directement à vos métriques depuis son compte Coach Intervals.icu : vous n’avez aucune clé API à saisir.'
+                : 'Chiffrement AES-256-GCM côté serveur. Aucune clé API n’est conservée en clair côté navigateur.'}
             </p>
           </div>
-          {existingConn?.hasSecret && (
+          {(coachConn?.hasSecret || existingConn?.hasSecret) && (
             <span className="inline-flex items-center gap-1 font-mono text-[11px] font-bold text-[#14C38E] shrink-0">
-              <Lock size={12} /> AES-256-GCM ACTIF
+              <Lock size={12} />{' '}
+              {assignedCoach && coachConn?.hasSecret
+                ? 'CLÉ COACH ACTIVE'
+                : 'AES-256-GCM ACTIF'}
             </span>
           )}
         </div>
+
+        {assignedCoach && (
+          <div className="rounded-md bg-[#F8FAFC] border border-slate-200 border-l-2 border-l-[#14C38E] p-4 space-y-1.5 text-xs">
+            <div className="flex flex-wrap justify-between gap-2 font-mono text-[11px]">
+              <span className="text-slate-500 uppercase">Coach référent</span>
+              <span className="font-bold text-[#0F172A]">{assignedCoach.displayName}</span>
+            </div>
+            <div className="flex flex-wrap justify-between gap-2 font-mono text-[11px]">
+              <span className="text-slate-500 uppercase">ID Intervals.icu associé</span>
+              <span className="font-bold text-[#0F172A]">
+                {currentProfile?.intervalsAthleteId || 'En attente d’association par le coach'}
+              </span>
+            </div>
+            <div className="flex flex-wrap justify-between gap-2 font-mono text-[11px]">
+              <span className="text-slate-500 uppercase">Statut liaison coach</span>
+              <span
+                className={
+                  coachConn?.hasSecret
+                    ? 'font-bold text-[#047857]'
+                    : 'font-bold text-amber-700'
+                }
+              >
+                {coachConn?.hasSecret
+                  ? 'ACTIVE — aucune clé requise côté athlète'
+                  : 'EN ATTENTE DE CLÉ COACH'}
+              </span>
+            </div>
+          </div>
+        )}
 
         {connErr && (
           <div className="p-3 rounded-md bg-red-50 border-l-2 border-red-600 text-xs font-semibold text-red-800">
@@ -167,67 +213,140 @@ export default function AthleteSettingsPage() {
           </div>
         )}
 
-        <form onSubmit={handleConnectIntervals} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">
-                ID Athlète Intervals.icu (ex: i123456 ou 0)
+        {assignedCoach ? (
+          <details className="pt-1">
+            <summary className="text-xs font-semibold text-slate-500 hover:text-[#0F172A] cursor-pointer select-none">
+              Connexion personnelle avancée (optionnel — uniquement sans gestion coach)
+            </summary>
+            <form onSubmit={handleConnectIntervals} className="space-y-4 pt-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">
+                    ID Athlète Intervals.icu (ex: i123456 ou 0)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={intervalsAthleteId}
+                    onChange={(e) => setIntervalsAthleteId(e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">
+                    API Key personnelle
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder={
+                      existingConn?.hasSecret
+                        ? '•••••••• (saisir pour remplacer)'
+                        : 'API Key Developer Settings'
+                    }
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono"
+                  />
+                </div>
+              </div>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-md bg-[#F8FAFC] border border-slate-200 text-xs text-slate-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={healthConsent}
+                  onChange={(e) => setHealthConsent(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#14C38E]"
+                />
+                <span>
+                  <strong>Consentement RGPD Art. 9 :</strong> J&apos;autorise le traitement de mes données physiologiques Intervals.icu (CTL, ATL, FC, HRV, volume) dans le strict cadre de mon suivi trail.
+                </span>
               </label>
-              <input
-                type="text"
-                required
-                value={intervalsAthleteId}
-                onChange={(e) => setIntervalsAthleteId(e.target.value)}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono"
-              />
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={connecting}
+                  className="px-4 py-2 rounded-md bg-[#0F172A] hover:bg-[#FF5A36] text-white font-semibold text-xs cursor-pointer disabled:opacity-50 transition-colors"
+                >
+                  {connecting ? 'Vérification...' : 'Connecter & chiffrer'}
+                </button>
+
+                {existingConn && (
+                  <button
+                    type="button"
+                    onClick={() => disconnectIntervalsAccount(currentUser.id)}
+                    className="px-3.5 py-2 rounded-md border border-slate-300 hover:border-red-500 text-red-700 text-xs font-semibold cursor-pointer"
+                  >
+                    Révoquer ma clé personnelle
+                  </button>
+                )}
+              </div>
+            </form>
+          </details>
+        ) : (
+          <form onSubmit={handleConnectIntervals} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">
+                  ID Athlète Intervals.icu (ex: i123456 ou 0)
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={intervalsAthleteId}
+                  onChange={(e) => setIntervalsAthleteId(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">
+                  API Key personnelle
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder={existingConn?.hasSecret ? '•••••••• (saisir pour remplacer)' : 'API Key Developer Settings'}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono"
+                />
+              </div>
             </div>
-            <div>
-              <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">
-                API Key personnelle
-              </label>
+
+            <label className="flex items-start gap-2.5 p-3 rounded-md bg-[#F8FAFC] border border-slate-200 text-xs text-slate-600 cursor-pointer">
               <input
-                type="password"
-                required
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={existingConn?.hasSecret ? '•••••••• (saisir pour remplacer)' : 'API Key Developer Settings'}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono"
+                type="checkbox"
+                checked={healthConsent}
+                onChange={(e) => setHealthConsent(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[#14C38E]"
               />
-            </div>
-          </div>
+              <span>
+                <strong>Consentement RGPD Art. 9 :</strong> J&apos;autorise le traitement de mes données physiologiques Intervals.icu (CTL, ATL, FC, HRV, volume) dans le strict cadre de mon suivi trail.
+              </span>
+            </label>
 
-          <label className="flex items-start gap-2.5 p-3 rounded-md bg-[#F8FAFC] border border-slate-200 text-xs text-slate-600 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={healthConsent}
-              onChange={(e) => setHealthConsent(e.target.checked)}
-              className="mt-0.5 h-4 w-4 accent-[#14C38E]"
-            />
-            <span>
-              <strong>Consentement RGPD Art. 9 :</strong> J&apos;autorise le traitement de mes données physiologiques Intervals.icu (CTL, ATL, FC, HRV, volume) dans le strict cadre de mon suivi trail.
-            </span>
-          </label>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="submit"
-              disabled={connecting}
-              className="px-4 py-2 rounded-md bg-[#0F172A] hover:bg-[#FF5A36] text-white font-semibold text-xs cursor-pointer disabled:opacity-50 transition-colors"
-            >
-              {connecting ? 'Vérification...' : 'Connecter & chiffrer'}
-            </button>
-
-            {existingConn && (
+            <div className="flex flex-wrap items-center gap-3">
               <button
-                type="button"
-                onClick={() => disconnectIntervalsAccount(currentUser.id)}
-                className="px-3.5 py-2 rounded-md border border-slate-300 hover:border-red-500 text-red-700 text-xs font-semibold cursor-pointer"
+                type="submit"
+                disabled={connecting}
+                className="px-4 py-2 rounded-md bg-[#0F172A] hover:bg-[#FF5A36] text-white font-semibold text-xs cursor-pointer disabled:opacity-50 transition-colors"
               >
-                Révoquer la connexion
+                {connecting ? 'Vérification...' : 'Connecter & chiffrer'}
               </button>
-            )}
-          </div>
-        </form>
+
+              {existingConn && (
+                <button
+                  type="button"
+                  onClick={() => disconnectIntervalsAccount(currentUser.id)}
+                  className="px-3.5 py-2 rounded-md border border-slate-300 hover:border-red-500 text-red-700 text-xs font-semibold cursor-pointer"
+                >
+                  Révoquer la connexion
+                </button>
+              )}
+            </div>
+          </form>
+        )}
       </section>
 
       {/* 3. Centre RGPD */}

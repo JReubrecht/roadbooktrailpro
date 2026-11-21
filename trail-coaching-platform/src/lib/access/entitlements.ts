@@ -9,6 +9,8 @@ import type {
 } from '@/types/domain';
 
 export interface EvaluatedAccess {
+  isAdmin: boolean;
+  isCoach: boolean;
   canAccessCoachDashboard: boolean;
   canAccessAthleteSpace: boolean;
   canAccessFullCoaching: boolean;
@@ -52,6 +54,8 @@ export function evaluateAccess(
 ): EvaluatedAccess {
   if (!user) {
     return {
+      isAdmin: false,
+      isCoach: false,
       canAccessCoachDashboard: false,
       canAccessAthleteSpace: false,
       canAccessFullCoaching: false,
@@ -64,7 +68,9 @@ export function evaluateAccess(
     };
   }
 
-  const isCoachOrAdmin = user.role === 'coach' || user.role === 'admin';
+  const isAdmin = user.role === 'admin';
+  const isCoach = user.role === 'coach';
+  const isCoachOrAdmin = isAdmin || isCoach;
   const tierStatus: TierStatus = profile?.tierStatus || 'free';
   const validEntitlements = entitlements.filter((e) => e.userId === user.id && isEntitlementCurrentlyValid(e));
 
@@ -86,6 +92,8 @@ export function evaluateAccess(
   );
 
   return {
+    isAdmin,
+    isCoach,
     canAccessCoachDashboard: isCoachOrAdmin,
     canAccessAthleteSpace: true,
     canAccessFullCoaching: hasCoachingGrant,
@@ -94,7 +102,11 @@ export function evaluateAccess(
     canUseFreeTools: true,
     unlockedPlanIds,
     tierStatus,
-    tierBadgeLabel: isCoachOrAdmin ? 'Coach / Admin' : TIER_LABELS[tierStatus],
+    tierBadgeLabel: isAdmin
+      ? 'Admin / Coach Principal'
+      : isCoach
+        ? 'Coach Équipe'
+        : TIER_LABELS[tierStatus],
   };
 }
 

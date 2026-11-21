@@ -53,13 +53,6 @@ export async function POST(request: NextRequest) {
 
   const { userId, demoMode } = parsed.data;
 
-  if (userId !== auth.session.uid && !auth.session.isCoachOrAdmin) {
-    return NextResponse.json(
-      { error: 'Synchronisation non autorisée pour cet athlète.' },
-      { status: 403 }
-    );
-  }
-
   if (demoMode && process.env.NODE_ENV === 'production') {
     return NextResponse.json(
       { error: 'La synchronisation simulée est désactivée en production.' },
@@ -67,36 +60,127 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  let storedAthleteId = parsed.data.intervalsAthleteId?.trim() || '0';
-  let secretEncrypted: string | null = null;
+  let storedAssignedCoachId: string | undefined;
+  let storedProfileIntervalsId = '';
+  let athleteConnIntervalsId = '';
+  let athleteConnScope: string | undefined;
+  let athleteSecretEncrypted: string | null = null;
+  let coachSecretEncrypted: string | null = null;
 
-  if (isFirebaseAdminConfigured()) {
-    const adminDb = getAdminDb();
-    if (!adminDb) {
-      return NextResponse.json({ error: 'Firestore Admin indisponible.' }, { status: 500 });
-    }
-    const connSnap = await adminDb.collection('intervalsConnections').doc(userId).get();
-    if (connSnap.exists) {
-      const data = connSnap.data() || {};
-      if (typeof data.intervalsAthleteId === 'string' && data.intervalsAthleteId.trim()) {
-        storedAthleteId = data.intervalsAthleteId.trim();
+  const adminDb = isFirebaseAdminConfigured() ? getAdminDb() : null;
+  if (isFirebaseAdminConfigured() && !adminDb) {
+    return NextResponse.json({ error: 'Firestore Admin indisponible.' }, { status: 500 });
+  }
+
+  if (adminDb) {
+    const [profileSnap, athleteConnSnap] = await Promise.all([
+      adminDb.collection('athleteProfiles').doc(userId).get(),
+      adminDb.collection('intervalsConnections').doc(userId).get(),
+    ]);
+
+    if (profileSnap.exists) {
+      const pData = profileSnap.data() || {};
+      if (typeof pData.assignedCoachId === 'string' && pData.assignedCoachId.trim()) {
+        storedAssignedCoachId = pData.assignedCoachId.trim();
       }
-      if (typeof data.secretEncrypted === 'string' && data.secretEncrypted.trim()) {
-        secretEncrypted = data.secretEncrypted.trim();
+      if (typeof pData.intervalsAthleteId === 'string' && pData.intervalsAthleteId.trim()) {
+        storedProfileIntervalsId = pData.intervalsAthleteId.trim();
+      }
+    }
+
+    if (athleteConnSnap.exists) {
+      const cData = athleteConnSnap.data() || {};
+      athleteConnScope =
+        typeof cData.connectionScope === 'string' ? cData.connectionScope : undefined;
+      if (typeof cData.intervalsAthleteId === 'string' && cData.intervalsAthleteId.trim()) {
+        athleteConnIntervalsId = cData.intervalsAthleteId.trim();
+      }
+      if (
+        athleteConnScope !== 'coach' &&
+        typeof cData.secretEncrypted === 'string' &&
+        cData.secretEncrypted.trim()
+      ) {
+        athleteSecretEncrypted = cData.secretEncrypted.trim();
       }
     }
   } else {
-    secretEncrypted = getSandboxIntervalsSecret(userId);
+    athleteSecretEncrypted = getSandboxIntervalsSecret(userId);
+  }
+
+  // Vérification d'autorisation multi-coachs stricte
+  if (!auth.session.isAdmin) {
+    if (auth.session.role === 'coach') {
+      const isSelf = userId === auth.session.uid;
+      const isAssignedAthlete = Boolean(
+        adminDb
+          ? storedAssignedCoachId === auth.session.uid
+          : true
+      );
+      if (!isSelf && !isAssignedAthlete) {
+        return NextResponse.json(
+          { error: 'Cet athlète est assigné à un autre coach.' },
+          { status: 403 }
+        );
+      }
+    } else if (userId !== auth.session.uid) {
+      return NextResponse.json(
+        { error: 'Synchronisation non autorisée pour cet athlète.' },
+        { status: 403 }
+      );
+    }
+  }
+
+  const effectiveCoachUid =
+    storedAssignedCoachId ||
+    (auth.session.isCoachOrAdmin && userId !== auth.session.uid
+      ? auth.session.uid
+      : undefined);
+
+  const athleteIntervalsId =
+    storedProfileIntervalsId ||
+    athleteConnIntervalsId ||
+    parsed.data.intervalsAthleteId?.trim() ||
+    '';
+
+  if (effectiveCoachUid && athleteIntervalsId && athleteIntervalsId !== '0') {
+    if (adminDb) {
+      const coachConnSnap = await adminDb
+        .collection('intervalsConnections')
+        .doc(effectiveCoachUid)
+        .get();
+      if (coachConnSnap.exists) {
+        const cData = coachConnSnap.data() || {};
+        if (typeof cData.secretEncrypted === 'string' && cData.secretEncrypted.trim()) {
+          coachSecretEncrypted = cData.secretEncrypted.trim();
+        }
+      }
+    } else {
+      coachSecretEncrypted = getSandboxIntervalsSecret(effectiveCoachUid);
+    }
+  }
+
+  let selectedSecret: string | null = null;
+  let syncedVia: 'coach_key' | 'athlete_key' | 'sandbox' = 'sandbox';
+  let targetIdForFetch = athleteIntervalsId || '0';
+
+  if (coachSecretEncrypted && athleteIntervalsId && athleteIntervalsId !== '0') {
+    selectedSecret = coachSecretEncrypted;
+    syncedVia = 'coach_key';
+    targetIdForFetch = athleteIntervalsId;
+  } else if (athleteSecretEncrypted) {
+    selectedSecret = athleteSecretEncrypted;
+    syncedVia = 'athlete_key';
+    targetIdForFetch = athleteIntervalsId || '0';
   }
 
   const effectiveDemoMode = Boolean(
-    demoMode && process.env.NODE_ENV !== 'production' && !secretEncrypted
+    demoMode && process.env.NODE_ENV !== 'production' && !selectedSecret
   );
 
   let apiKey: string | undefined;
-  if (secretEncrypted) {
+  if (selectedSecret) {
     try {
-      apiKey = decryptIntervalsSecret(secretEncrypted);
+      apiKey = decryptIntervalsSecret(selectedSecret);
     } catch {
       return NextResponse.json(
         { error: 'Impossible de déchiffrer le secret Intervals.icu côté serveur.' },
@@ -105,25 +189,30 @@ export async function POST(request: NextRequest) {
     }
   } else if (!effectiveDemoMode) {
     return NextResponse.json(
-      { error: 'Aucune clé API Intervals.icu connectée sur ce compte.' },
+      {
+        error:
+          'Impossible de synchroniser : associez un ID Intervals.icu à l’athlète et connectez la clé API Coach (ou une clé personnelle).',
+      },
       { status: 400 }
     );
   }
 
+  const statusConnDocId =
+    syncedVia === 'coach_key' && effectiveCoachUid ? effectiveCoachUid : userId;
+
   try {
     const snapshot = apiKey
-      ? await fetchIntervalsSnapshotServer(userId, storedAthleteId, apiKey)
+      ? await fetchIntervalsSnapshotServer(userId, targetIdForFetch, apiKey)
       : buildSandboxSnapshot(userId);
 
     const nowIso = new Date().toISOString();
 
-    if (isFirebaseAdminConfigured()) {
-      const adminDb = getAdminDb();
-      if (adminDb) {
-        const batch = adminDb.batch();
-        batch.set(adminDb.collection('intervalsSnapshots').doc(snapshot.id), snapshot);
+    if (adminDb) {
+      const batch = adminDb.batch();
+      batch.set(adminDb.collection('intervalsSnapshots').doc(snapshot.id), snapshot);
+      if (syncedVia !== 'sandbox') {
         batch.set(
-          adminDb.collection('intervalsConnections').doc(userId),
+          adminDb.collection('intervalsConnections').doc(statusConnDocId),
           {
             syncStatus: 'ok',
             lastSyncedAt: nowIso,
@@ -132,33 +221,34 @@ export async function POST(request: NextRequest) {
           },
           { merge: true }
         );
-        await batch.commit();
       }
+      await batch.commit();
     }
 
     return NextResponse.json({
       ok: true,
       snapshot,
       lastSyncedAt: nowIso,
+      syncedVia,
+      ...(syncedVia === 'coach_key' && effectiveCoachUid
+        ? { syncedByCoachId: effectiveCoachUid }
+        : {}),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Erreur synchronisation Intervals.icu';
-    if (isFirebaseAdminConfigured()) {
-      const adminDb = getAdminDb();
-      if (adminDb) {
-        await adminDb
-          .collection('intervalsConnections')
-          .doc(userId)
-          .set(
-            {
-              syncStatus: 'error',
-              lastErrorMessage: msg,
-              updatedAt: new Date().toISOString(),
-            },
-            { merge: true }
-          )
-          .catch(() => {});
-      }
+    if (adminDb && syncedVia !== 'sandbox') {
+      await adminDb
+        .collection('intervalsConnections')
+        .doc(statusConnDocId)
+        .set(
+          {
+            syncStatus: 'error',
+            lastErrorMessage: msg,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        )
+        .catch(() => {});
     }
     return NextResponse.json({ error: msg }, { status: 502 });
   }

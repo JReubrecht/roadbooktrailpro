@@ -61,11 +61,23 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Firestore Admin indisponible.' }, { status: 500 });
     }
 
+    const profileRef = adminDb.collection('athleteProfiles').doc(userId);
+    const profileSnap = await profileRef.get();
+    if (!auth.session.isAdmin) {
+      const assignedCoachId = profileSnap.exists
+        ? profileSnap.data()?.assignedCoachId
+        : undefined;
+      if (assignedCoachId !== auth.session.uid) {
+        return NextResponse.json(
+          { error: 'Vous ne pouvez gérer les droits que de vos athlètes assignés.' },
+          { status: 403 }
+        );
+      }
+    }
+
     const batch = adminDb.batch();
     batch.set(adminDb.collection('entitlements').doc(entitlement.id), entitlement);
 
-    const profileRef = adminDb.collection('athleteProfiles').doc(userId);
-    const profileSnap = await profileRef.get();
     const existingTier = profileSnap.exists
       ? (profileSnap.data()?.tierStatus as TierStatus | undefined)
       : undefined;
@@ -118,18 +130,31 @@ export async function DELETE(request: NextRequest) {
     if (!adminDb) {
       return NextResponse.json({ error: 'Firestore Admin indisponible.' }, { status: 500 });
     }
+
+    const entRef = adminDb.collection('entitlements').doc(entitlementId);
+    const entSnap = await entRef.get();
+    if (!auth.session.isAdmin && entSnap.exists) {
+      const targetUserId = entSnap.data()?.userId;
+      if (typeof targetUserId === 'string') {
+        const pSnap = await adminDb.collection('athleteProfiles').doc(targetUserId).get();
+        if (!pSnap.exists || pSnap.data()?.assignedCoachId !== auth.session.uid) {
+          return NextResponse.json(
+            { error: 'Vous ne pouvez révoquer que les droits de vos athlètes assignés.' },
+            { status: 403 }
+          );
+        }
+      }
+    }
+
     const nowIso = new Date().toISOString();
-    await adminDb
-      .collection('entitlements')
-      .doc(entitlementId)
-      .set(
-        {
-          isActive: false,
-          revokedAt: nowIso,
-          revokedBy: auth.session.uid,
-        },
-        { merge: true }
-      );
+    await entRef.set(
+      {
+        isActive: false,
+        revokedAt: nowIso,
+        revokedBy: auth.session.uid,
+      },
+      { merge: true }
+    );
   }
 
   return NextResponse.json({ ok: true, id: entitlementId });

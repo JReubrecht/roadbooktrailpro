@@ -11,7 +11,8 @@ const PERSONAS: Array<{ id: DemoPersonaId; label: string; short: string }> = [
   { id: 'pilot-claire', label: 'Pilote : Claire Morel (Showcase)', short: 'Pilote : Claire' },
   { id: 'pilot-thomas', label: 'Pilote : Thomas Garnier (Alerte)', short: 'Pilote : Thomas' },
   { id: 'athlete-free-demo', label: 'Athlète Free : Camille', short: 'Athlète Free' },
-  { id: 'coach-admin-1', label: 'Coach / Admin (accès complet)', short: 'Coach / Admin' },
+  { id: 'coach-2', label: 'Coach Équipe : Julien Vasseur', short: 'Coach : Julien' },
+  { id: 'coach-admin-1', label: 'Admin / Coach Principal', short: 'Admin / Coach' },
 ];
 
 export default function RolePreviewDock() {

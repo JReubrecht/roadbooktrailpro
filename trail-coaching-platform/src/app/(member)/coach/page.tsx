@@ -22,11 +22,34 @@ export default function CoachDashboardPage() {
   } = usePlatform();
 
   const [syncingUserId, setSyncingUserId] = useState<string | null>(null);
+  const [syncingAll, setSyncingAll] = useState(false);
+  const [coachFilter, setCoachFilter] = useState<string>('all');
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
-  const athletes = store.users.filter((u) => u.role === 'athlete');
-  const [grantUserId, setGrantUserId] = useState<string>(athletes[0]?.id || 'athlete-free-demo');
+  const staffUsers = store.users.filter((u) => u.role === 'coach' || u.role === 'admin');
+  const allAthletes = store.users.filter((u) => u.role === 'athlete');
+
+  const scopedAthletes = useMemo(() => {
+    if (!currentUser) return [];
+    return allAthletes.filter((ath) => {
+      const profile = store.athleteProfiles.find((p) => p.userId === ath.id);
+      if (!access.isAdmin) {
+        return profile?.assignedCoachId === currentUser.id;
+      }
+      if (coachFilter === 'all') return true;
+      if (coachFilter === 'unassigned') return !profile?.assignedCoachId;
+      return profile?.assignedCoachId === coachFilter;
+    });
+  }, [allAthletes, store.athleteProfiles, access.isAdmin, currentUser, coachFilter]);
+
+  const [grantUserId, setGrantUserId] = useState<string>('');
+  const effectiveGrantUserId = useMemo(() => {
+    if (grantUserId && scopedAthletes.some((a) => a.id === grantUserId)) {
+      return grantUserId;
+    }
+    return scopedAthletes[0]?.id || '';
+  }, [grantUserId, scopedAthletes]);
   const [grantType, setGrantType] = useState<GrantType>('plan_access');
   const [grantPlanId, setGrantPlanId] = useState<string>(store.trainingPlans[0]?.id || '');
   const [grantSource, setGrantSource] = useState<EntitlementSource>('manual_grant');
@@ -37,7 +60,7 @@ export default function CoachDashboardPage() {
   const [newPlanPriceEur, setNewPlanPriceEur] = useState('79');
 
   const allAlerts = useMemo(() => {
-    const collected = athletes.flatMap((ath) => {
+    const collected = scopedAthletes.flatMap((ath) => {
       const latestSnap = store.intervalsSnapshots
         .filter((s) => s.userId === ath.id)
         .sort((a, b) => b.snapshotDate.localeCompare(a.snapshotDate))[0];
@@ -45,7 +68,7 @@ export default function CoachDashboardPage() {
     });
     const order = { critical: 0, warning: 1, info: 2 };
     return collected.sort((a, b) => order[a.severity] - order[b.severity]);
-  }, [athletes, store.intervalsSnapshots, store.checkIns]);
+  }, [scopedAthletes, store.intervalsSnapshots, store.checkIns]);
 
   if (!currentUser || !access.canAccessCoachDashboard) {
     return (
@@ -63,6 +86,10 @@ export default function CoachDashboardPage() {
     );
   }
 
+  const ownCoachConn = store.intervalsConnections.find(
+    (c) => c.userId === currentUser.id
+  );
+
   const handleSyncAthlete = async (userId: string, name: string) => {
     setErrorBanner(null);
     setStatusBanner(null);
@@ -79,13 +106,48 @@ export default function CoachDashboardPage() {
     }
   };
 
+  const handleSyncAll = async () => {
+    setErrorBanner(null);
+    setStatusBanner(null);
+    setSyncingAll(true);
+    let syncedCount = 0;
+    const failures: string[] = [];
+    for (const ath of scopedAthletes) {
+      const profile = store.athleteProfiles.find((p) => p.userId === ath.id);
+      const personalConn = store.intervalsConnections.find(
+        (c) => c.userId === ath.id && c.connectionScope !== 'coach'
+      );
+      if (!profile?.intervalsAthleteId && !personalConn) continue;
+      try {
+        await syncAthleteIntervals(ath.id);
+        syncedCount += 1;
+      } catch (err: unknown) {
+        failures.push(
+          `${ath.displayName} (${err instanceof Error ? err.message : 'erreur'})`
+        );
+      }
+    }
+    setSyncingAll(false);
+    if (failures.length > 0) {
+      setErrorBanner(`Échecs partiels : ${failures.join(' · ')}`);
+    }
+    if (syncedCount > 0) {
+      setStatusBanner(`${syncedCount} athlète(s) synchronisé(s) via Intervals.icu.`);
+    } else if (failures.length === 0) {
+      setStatusBanner(
+        'Aucun athlète lié à un identifiant Intervals.icu dans cette vue. Associez-les depuis Équipe Coachs & Intervals.'
+      );
+    }
+  };
+
   const handleGrantSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!effectiveGrantUserId) return;
     setErrorBanner(null);
     setStatusBanner(null);
     try {
       await grantEntitlement({
-        userId: grantUserId,
+        userId: effectiveGrantUserId,
         grantType,
         trainingPlanId: grantType === 'plan_access' ? grantPlanId : undefined,
         source: grantSource,
@@ -156,21 +218,54 @@ export default function CoachDashboardPage() {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Link
-            href="/coach/brand"
-            className="px-3.5 py-2 rounded-md bg-white border border-slate-300 hover:border-[#0F172A] text-xs font-semibold text-[#0F172A]"
-          >
-            Logo &amp; Charte graphique
-          </Link>
           <button
             type="button"
-            onClick={resetDemoData}
-            className="px-3.5 py-2 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-600 cursor-pointer"
+            onClick={handleSyncAll}
+            disabled={syncingAll}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md bg-[#0F172A] hover:bg-[#FF5A36] text-white text-xs font-semibold cursor-pointer disabled:opacity-50 transition-colors"
           >
-            Réinitialiser données pilotes
+            <RefreshCw size={13} className={syncingAll ? 'animate-spin' : ''} />
+            <span>{syncingAll ? 'Synchronisation...' : 'Tout synchroniser'}</span>
           </button>
+          <Link
+            href="/coach/team"
+            className="px-3.5 py-2 rounded-md bg-white border border-slate-300 hover:border-[#0F172A] text-xs font-semibold text-[#0F172A]"
+          >
+            Équipe &amp; Clé Intervals
+          </Link>
+          {access.isAdmin && (
+            <>
+              <Link
+                href="/coach/brand"
+                className="px-3.5 py-2 rounded-md bg-white border border-slate-300 hover:border-[#0F172A] text-xs font-semibold text-[#0F172A]"
+              >
+                Logo &amp; Charte graphique
+              </Link>
+              <button
+                type="button"
+                onClick={resetDemoData}
+                className="px-3.5 py-2 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-600 cursor-pointer"
+              >
+                Réinitialiser données pilotes
+              </button>
+            </>
+          )}
         </div>
       </div>
+
+      {!ownCoachConn?.hasSecret && (
+        <div className="p-4 rounded-lg bg-white border border-slate-200 border-l-2 border-l-[#FF5A36] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <p className="text-xs text-slate-700">
+            <strong>Synchronisation Coach Intervals.icu :</strong> renseignez votre clé API Coach pour importer et actualiser automatiquement vos athlètes sans qu&apos;ils aient à configurer de clé API.
+          </p>
+          <Link
+            href="/coach/team"
+            className="px-3 py-1.5 rounded-md bg-[#FF5A36] text-white text-xs font-semibold shrink-0"
+          >
+            Configurer ma clé Coach
+          </Link>
+        </div>
+      )}
 
       {statusBanner && (
         <div className="p-3 rounded-md bg-emerald-50 border-l-2 border-[#14C38E] text-xs font-semibold text-[#047857]">
@@ -183,55 +278,57 @@ export default function CoachDashboardPage() {
         </div>
       )}
 
-      {/* 0. Contrôle Admin : Vente de programmes */}
-      <section className="bg-white rounded-lg border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#FF5A36] font-semibold">
-              Boutique &amp; Catalogue
-            </span>
-            <span
-              className={
-                featureFlags.programSalesEnabled
-                  ? 'font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-50 text-[#047857] border border-emerald-200 font-semibold'
-                  : 'font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-semibold'
-              }
-            >
-              {featureFlags.programSalesEnabled ? 'ACTIVE EN LIGNE' : 'MASQUÉE AU PUBLIC'}
-            </span>
+      {/* 0. Contrôle Admin : Vente de programmes (Admin uniquement) */}
+      {access.isAdmin && (
+        <section className="bg-white rounded-lg border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#FF5A36] font-semibold">
+                Boutique &amp; Catalogue
+              </span>
+              <span
+                className={
+                  featureFlags.programSalesEnabled
+                    ? 'font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-50 text-[#047857] border border-emerald-200 font-semibold'
+                    : 'font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-semibold'
+                }
+              >
+                {featureFlags.programSalesEnabled ? 'ACTIVE EN LIGNE' : 'MASQUÉE AU PUBLIC'}
+              </span>
+            </div>
+            <h2 className="text-base font-bold text-[#0F172A]">
+              Vente de programmes d&apos;entraînement
+            </h2>
+            <p className="text-xs text-slate-600 max-w-2xl leading-relaxed">
+              {featureFlags.programSalesEnabled
+                ? 'La vitrine catalogue, les tarifs et le paiement des plans sont visibles par le grand public.'
+                : 'La boutique publique est masquée par défaut. Vos brouillons de plans et les attributions manuelles aux athlètes pilotes restent pleinement opérationnels.'}
+            </p>
           </div>
-          <h2 className="text-base font-bold text-[#0F172A]">
-            Vente de programmes d&apos;entraînement
-          </h2>
-          <p className="text-xs text-slate-600 max-w-2xl leading-relaxed">
-            {featureFlags.programSalesEnabled
-              ? 'La vitrine catalogue, les tarifs et le paiement des plans sont visibles par le grand public.'
-              : 'La boutique publique est masquée par défaut. Vos brouillons de plans et les attributions manuelles aux athlètes pilotes restent pleinement opérationnels.'}
-          </p>
-        </div>
 
-        <button
-          type="button"
-          onClick={() => {
-            const nextVal = !featureFlags.programSalesEnabled;
-            updateFeatureFlags({ programSalesEnabled: nextVal });
-            setStatusBanner(
-              nextVal
-                ? 'Vente de programmes activée pour le public (/catalog, accueil, navigation).'
-                : 'Vente de programmes masquée au public. Les accès pilotes restent actifs.'
-            );
-          }}
-          className={`px-4 py-2 rounded-md text-xs font-semibold shrink-0 cursor-pointer transition-colors ${
-            featureFlags.programSalesEnabled
-              ? 'border border-slate-300 bg-white hover:bg-slate-50 text-[#0F172A]'
-              : 'bg-[#FF5A36] hover:bg-[#E34A28] text-white'
-          }`}
-        >
-          {featureFlags.programSalesEnabled
-            ? 'Masquer la vente au public'
-            : 'Activer la vente au public'}
-        </button>
-      </section>
+          <button
+            type="button"
+            onClick={() => {
+              const nextVal = !featureFlags.programSalesEnabled;
+              updateFeatureFlags({ programSalesEnabled: nextVal });
+              setStatusBanner(
+                nextVal
+                  ? 'Vente de programmes activée pour le public (/catalog, accueil, navigation).'
+                  : 'Vente de programmes masquée au public. Les accès pilotes restent actifs.'
+              );
+            }}
+            className={`px-4 py-2 rounded-md text-xs font-semibold shrink-0 cursor-pointer transition-colors ${
+              featureFlags.programSalesEnabled
+                ? 'border border-slate-300 bg-white hover:bg-slate-50 text-[#0F172A]'
+                : 'bg-[#FF5A36] hover:bg-[#E34A28] text-white'
+            }`}
+          >
+            {featureFlags.programSalesEnabled
+              ? 'Masquer la vente au public'
+              : 'Activer la vente au public'}
+          </button>
+        </section>
+      )}
 
       {/* 1. Alertes */}
       <section className="space-y-3">
@@ -281,9 +378,58 @@ export default function CoachDashboardPage() {
 
       {/* 2. Tableau de supervision des athlètes */}
       <section className="space-y-3">
-        <h2 className="font-mono text-xs uppercase tracking-wider text-slate-500">
-          Effectif suivi ({athletes.length})
-        </h2>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <h2 className="font-mono text-xs uppercase tracking-wider text-slate-500">
+            Effectif suivi ({scopedAthletes.length})
+          </h2>
+          {access.isAdmin && (
+            <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+              <button
+                type="button"
+                onClick={() => setCoachFilter('all')}
+                className={`px-2.5 py-1 rounded border cursor-pointer ${
+                  coachFilter === 'all'
+                    ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                    : 'bg-white text-slate-600 border-slate-300 hover:border-[#0F172A]'
+                }`}
+              >
+                Tous ({allAthletes.length})
+              </button>
+              {staffUsers.map((c) => {
+                const count = allAthletes.filter(
+                  (a) =>
+                    store.athleteProfiles.find((p) => p.userId === a.id)
+                      ?.assignedCoachId === c.id
+                ).length;
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => setCoachFilter(c.id)}
+                    className={`px-2.5 py-1 rounded border cursor-pointer ${
+                      coachFilter === c.id
+                        ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                        : 'bg-white text-slate-600 border-slate-300 hover:border-[#0F172A]'
+                    }`}
+                  >
+                    {c.id === currentUser.id ? 'Mes athlètes' : c.displayName} ({count})
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setCoachFilter('unassigned')}
+                className={`px-2.5 py-1 rounded border cursor-pointer ${
+                  coachFilter === 'unassigned'
+                    ? 'bg-[#0F172A] text-white border-[#0F172A]'
+                    : 'bg-white text-slate-600 border-slate-300 hover:border-[#0F172A]'
+                }`}
+              >
+                Non assignés
+              </button>
+            </div>
+          )}
+        </div>
 
         <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
           <div className="overflow-x-auto">
@@ -291,7 +437,10 @@ export default function CoachDashboardPage() {
               <thead className="bg-slate-100 border-b border-slate-200 font-mono text-[11px] uppercase tracking-wider text-slate-600">
                 <tr>
                   <th className="px-4 py-3 font-semibold">Athlète</th>
-                  <th className="px-4 py-3 font-semibold">Statut</th>
+                  {access.isAdmin && (
+                    <th className="px-4 py-3 font-semibold">Coach référent</th>
+                  )}
+                  <th className="px-4 py-3 font-semibold">Liaison Intervals</th>
                   <th className="px-4 py-3 font-semibold text-right">CTL</th>
                   <th className="px-4 py-3 font-semibold text-right">ATL</th>
                   <th className="px-4 py-3 font-semibold text-right">TSB</th>
@@ -301,8 +450,17 @@ export default function CoachDashboardPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
-                {athletes.map((ath) => {
+                {scopedAthletes.map((ath) => {
                   const profile = store.athleteProfiles.find((p) => p.userId === ath.id);
+                  const assignedCoach = profile?.assignedCoachId
+                    ? staffUsers.find((u) => u.id === profile.assignedCoachId)
+                    : undefined;
+                  const coachConn = assignedCoach
+                    ? store.intervalsConnections.find((c) => c.userId === assignedCoach.id)
+                    : undefined;
+                  const personalConn = store.intervalsConnections.find(
+                    (c) => c.userId === ath.id && c.connectionScope !== 'coach'
+                  );
                   const snap = store.intervalsSnapshots
                     .filter((s) => s.userId === ath.id)
                     .sort((a, b) => b.snapshotDate.localeCompare(a.snapshotDate))[0];
@@ -316,13 +474,33 @@ export default function CoachDashboardPage() {
                         <div className="text-xs text-slate-500 truncate max-w-[240px]">
                           {profile?.showcaseGoalRace || ath.email}
                         </div>
-                      </td>
-                      <td className="px-4 py-3.5 font-mono text-[11px]">
-                        <span className="uppercase font-semibold text-[#0F172A]">
+                        <div className="font-mono text-[10px] uppercase text-slate-400 mt-0.5">
                           {profile?.tierStatus || 'free'}
-                        </span>
-                        {hasPain && (
-                          <span className="ml-2 text-red-600 font-bold">[DOULEUR]</span>
+                          {hasPain && (
+                            <span className="ml-2 text-red-600 font-bold">[DOULEUR]</span>
+                          )}
+                        </div>
+                      </td>
+                      {access.isAdmin && (
+                        <td className="px-4 py-3.5 text-xs text-slate-700 font-medium">
+                          {assignedCoach ? assignedCoach.displayName : 'Non assigné'}
+                        </td>
+                      )}
+                      <td className="px-4 py-3.5 font-mono text-[11px]">
+                        {profile?.intervalsAthleteId && coachConn?.hasSecret ? (
+                          <span className="text-[#047857] font-semibold">
+                            Via Coach · {profile.intervalsAthleteId}
+                          </span>
+                        ) : profile?.intervalsAthleteId ? (
+                          <span className="text-amber-700 font-semibold">
+                            ID {profile.intervalsAthleteId} (clé coach requise)
+                          </span>
+                        ) : personalConn?.hasSecret ? (
+                          <span className="text-slate-600 font-semibold">
+                            Clé Perso · {personalConn.intervalsAthleteId}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">À associer</span>
                         )}
                       </td>
                       <td className="px-4 py-3.5 text-right font-mono font-bold tabular-nums text-[#0F172A]">
@@ -378,11 +556,11 @@ export default function CoachDashboardPage() {
               <div>
                 <label className="block font-mono text-[10px] uppercase text-slate-500 mb-1">Athlète</label>
                 <select
-                  value={grantUserId}
+                  value={effectiveGrantUserId}
                   onChange={(e) => setGrantUserId(e.target.value)}
                   className="w-full rounded-md border border-slate-300 px-2.5 py-2 font-semibold bg-white"
                 >
-                  {athletes.map((a) => (
+                  {scopedAthletes.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.displayName}
                     </option>
@@ -444,7 +622,11 @@ export default function CoachDashboardPage() {
 
           <div className="pt-3 border-t border-slate-100 max-h-44 overflow-y-auto divide-y divide-slate-100">
             {store.entitlements
-              .filter((e) => e.isActive)
+              .filter(
+                (e) =>
+                  e.isActive &&
+                  scopedAthletes.some((ath) => ath.id === e.userId)
+              )
               .map((ent) => {
                 const u = store.users.find((x) => x.id === ent.userId);
                 return (

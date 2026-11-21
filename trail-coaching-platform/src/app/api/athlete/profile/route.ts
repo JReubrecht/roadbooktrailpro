@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { FieldValue } from 'firebase-admin/firestore';
 import { requireAuth } from '@/lib/auth/serverAuth';
 import { getAdminDb, isFirebaseAdminConfigured } from '@/lib/firebase/admin';
 import { athleteProfilePatchSchema } from '@/lib/validation/schemas';
@@ -22,8 +23,16 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
-  const { userId, notesCoach, tierStatus, isShowcaseFeatured, showcaseQuote, ...rest } =
-    parsed.data;
+  const {
+    userId,
+    assignedCoachId,
+    intervalsAthleteId,
+    notesCoach,
+    tierStatus,
+    isShowcaseFeatured,
+    showcaseQuote,
+    ...rest
+  } = parsed.data;
 
   if (userId !== auth.session.uid && !auth.session.isCoachOrAdmin) {
     return NextResponse.json(
@@ -32,17 +41,28 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
+  if (assignedCoachId !== undefined && !auth.session.isAdmin) {
+    return NextResponse.json(
+      {
+        error:
+          'L’attribution du coach référent est réservée à l’administrateur principal.',
+      },
+      { status: 403 }
+    );
+  }
+
   const touchesCoachProtectedField =
     notesCoach !== undefined ||
     tierStatus !== undefined ||
     isShowcaseFeatured !== undefined ||
-    showcaseQuote !== undefined;
+    showcaseQuote !== undefined ||
+    intervalsAthleteId !== undefined;
 
   if (touchesCoachProtectedField && !auth.session.isCoachOrAdmin) {
     return NextResponse.json(
       {
         error:
-          'Les notes coach, statuts et mises en avant pilotes sont réservés au coach.',
+          'Les notes coach, statuts, identifiant Intervals et mises en avant pilotes sont réservés au coach.',
       },
       { status: 403 }
     );
@@ -55,6 +75,58 @@ export async function PATCH(request: NextRequest) {
     updatedAt: nowIso,
   };
 
+  if (isFirebaseAdminConfigured()) {
+    const adminDb = getAdminDb();
+    if (!adminDb) {
+      return NextResponse.json({ error: 'Firestore Admin indisponible.' }, { status: 500 });
+    }
+
+    const profileRef = adminDb.collection('athleteProfiles').doc(userId);
+    if (auth.session.role === 'coach') {
+      const existingSnap = await profileRef.get();
+      const existingCoachId = existingSnap.exists
+        ? existingSnap.data()?.assignedCoachId
+        : undefined;
+      if (existingCoachId !== auth.session.uid) {
+        return NextResponse.json(
+          { error: 'Cet athlète est suivi par un autre coach.' },
+          { status: 403 }
+        );
+      }
+    }
+
+    if (auth.session.isAdmin && assignedCoachId !== undefined) {
+      updatePayload.assignedCoachId =
+        assignedCoachId === null ? FieldValue.delete() : assignedCoachId;
+    }
+
+    if (auth.session.isCoachOrAdmin) {
+      if (notesCoach !== undefined) updatePayload.notesCoach = notesCoach;
+      if (tierStatus !== undefined) updatePayload.tierStatus = tierStatus;
+      if (isShowcaseFeatured !== undefined) {
+        updatePayload.isShowcaseFeatured = isShowcaseFeatured;
+      }
+      if (showcaseQuote !== undefined) updatePayload.showcaseQuote = showcaseQuote;
+      if (intervalsAthleteId !== undefined) {
+        const cleanId = intervalsAthleteId?.trim() || '';
+        updatePayload.intervalsAthleteId = cleanId ? cleanId : FieldValue.delete();
+      }
+    }
+
+    await profileRef.set(updatePayload, { merge: true });
+
+    const responseProfile: Record<string, unknown> = { ...updatePayload };
+    if (assignedCoachId === null) responseProfile.assignedCoachId = undefined;
+    if (intervalsAthleteId === null || intervalsAthleteId === '') {
+      responseProfile.intervalsAthleteId = undefined;
+    }
+
+    return NextResponse.json({ ok: true, profile: responseProfile });
+  }
+
+  if (auth.session.isAdmin && assignedCoachId !== undefined) {
+    updatePayload.assignedCoachId = assignedCoachId ?? undefined;
+  }
   if (auth.session.isCoachOrAdmin) {
     if (notesCoach !== undefined) updatePayload.notesCoach = notesCoach;
     if (tierStatus !== undefined) updatePayload.tierStatus = tierStatus;
@@ -62,17 +134,9 @@ export async function PATCH(request: NextRequest) {
       updatePayload.isShowcaseFeatured = isShowcaseFeatured;
     }
     if (showcaseQuote !== undefined) updatePayload.showcaseQuote = showcaseQuote;
-  }
-
-  if (isFirebaseAdminConfigured()) {
-    const adminDb = getAdminDb();
-    if (!adminDb) {
-      return NextResponse.json({ error: 'Firestore Admin indisponible.' }, { status: 500 });
+    if (intervalsAthleteId !== undefined) {
+      updatePayload.intervalsAthleteId = intervalsAthleteId?.trim() || undefined;
     }
-    await adminDb
-      .collection('athleteProfiles')
-      .doc(userId)
-      .set(updatePayload, { merge: true });
   }
 
   return NextResponse.json({ ok: true, profile: updatePayload });

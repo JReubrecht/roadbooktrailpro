@@ -6,12 +6,16 @@ import {
   setSandboxIntervalsSecret,
 } from '@/lib/firebase/admin';
 import {
+  fetchCoachIntervalsRosterServer,
   fetchIntervalsSnapshotServer,
   verifyIntervalsConnectionServer,
 } from '@/lib/intervals/client';
 import { encryptIntervalsSecret } from '@/lib/intervals/crypto';
 import { intervalsConnectSchema } from '@/lib/validation/schemas';
-import type { IntervalsConnectionPublic } from '@/types/domain';
+import type {
+  IntervalsCoachedAthlete,
+  IntervalsConnectionPublic,
+} from '@/types/domain';
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -32,9 +36,22 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { userId, intervalsAthleteId, apiKey } = parsed.data;
+  const { userId, intervalsAthleteId, apiKey, connectionScope } = parsed.data;
 
-  if (userId !== auth.session.uid && !auth.session.isCoachOrAdmin) {
+  if (connectionScope === 'coach') {
+    if (!auth.session.isCoachOrAdmin) {
+      return NextResponse.json(
+        { error: 'La connexion de clé Coach est réservée aux coachs et administrateurs.' },
+        { status: 403 }
+      );
+    }
+    if (userId !== auth.session.uid && !auth.session.isAdmin) {
+      return NextResponse.json(
+        { error: 'Vous ne pouvez configurer que votre propre clé API Coach.' },
+        { status: 403 }
+      );
+    }
+  } else if (userId !== auth.session.uid && !auth.session.isCoachOrAdmin) {
     return NextResponse.json(
       { error: 'Vous ne pouvez connecter que votre propre compte Intervals.icu.' },
       { status: 403 }
@@ -55,6 +72,55 @@ export async function POST(request: NextRequest) {
   const secretEncrypted = encryptIntervalsSecret(apiKey);
   const nowIso = new Date().toISOString();
 
+  if (connectionScope === 'coach') {
+    let coachedAthletes: IntervalsCoachedAthlete[] = [];
+    try {
+      coachedAthletes = await fetchCoachIntervalsRosterServer(
+        apiKey,
+        verification.resolvedAthleteId
+      );
+    } catch {
+      coachedAthletes = [];
+    }
+
+    const publicConnection: IntervalsConnectionPublic = {
+      userId,
+      intervalsAthleteId: verification.resolvedAthleteId,
+      authMode: 'api_key',
+      connectionScope: 'coach',
+      coachedAthletesCount: coachedAthletes.length,
+      hasSecret: true,
+      syncStatus: 'ok',
+      lastSyncedAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (isFirebaseAdminConfigured()) {
+      const adminDb = getAdminDb();
+      if (!adminDb) {
+        return NextResponse.json(
+          { error: 'Firestore Admin indisponible.' },
+          { status: 500 }
+        );
+      }
+      await adminDb.collection('intervalsConnections').doc(userId).set({
+        ...publicConnection,
+        secretEncrypted,
+      });
+    } else {
+      setSandboxIntervalsSecret(userId, secretEncrypted);
+    }
+
+    return NextResponse.json({
+      ok: true,
+      verification,
+      connection: publicConnection,
+      snapshot: null,
+      coachedAthletes,
+    });
+  }
+
+  // Flux athlète individuel (optionnel, ex. athlète autonome sans coach)
   const snapshot = await fetchIntervalsSnapshotServer(
     userId,
     verification.resolvedAthleteId,
@@ -65,6 +131,7 @@ export async function POST(request: NextRequest) {
     userId,
     intervalsAthleteId: verification.resolvedAthleteId,
     authMode: 'api_key',
+    connectionScope: 'athlete',
     hasSecret: true,
     syncStatus: 'ok',
     lastSyncedAt: nowIso,
@@ -83,6 +150,15 @@ export async function POST(request: NextRequest) {
       secretEncrypted,
     });
     batch.set(adminDb.collection('intervalsSnapshots').doc(snapshot.id), snapshot);
+    batch.set(
+      adminDb.collection('athleteProfiles').doc(userId),
+      {
+        userId,
+        intervalsAthleteId: verification.resolvedAthleteId,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
     batch.set(
       adminDb.collection('users').doc(userId),
       {

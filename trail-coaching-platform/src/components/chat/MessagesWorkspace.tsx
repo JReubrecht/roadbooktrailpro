@@ -67,9 +67,9 @@ export default function MessagesWorkspace() {
     if (!currentUser) return [];
     const uid = currentUser.id;
     return store.chatRooms
-      .filter((r) => access.canAccessCoachDashboard || r.memberIds.includes(uid))
+      .filter((r) => access.isAdmin || r.memberIds.includes(uid))
       .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
-  }, [store.chatRooms, currentUser, access.canAccessCoachDashboard]);
+  }, [store.chatRooms, currentUser, access.isAdmin]);
 
   const getRoomDisplayName = useCallback(
     (room: ChatRoom): string => {
@@ -143,9 +143,24 @@ export default function MessagesWorkspace() {
   if (!currentUser) return null;
 
   const otherUsers = store.users.filter((u) => u.id !== currentUser.id);
-  const directContacts = access.canAccessCoachDashboard
+  const myProfile = store.athleteProfiles.find((p) => p.userId === currentUser.id);
+  const directContacts = access.isAdmin
     ? otherUsers
-    : otherUsers.filter((u) => u.role === 'coach' || u.role === 'admin' || u.id === 'coach-admin-1');
+    : access.canAccessCoachDashboard
+      ? otherUsers.filter((u) => {
+          if (u.role === 'coach' || u.role === 'admin') return true;
+          return (
+            store.athleteProfiles.find((p) => p.userId === u.id)?.assignedCoachId ===
+            currentUser.id
+          );
+        })
+      : otherUsers
+          .filter((u) => u.role === 'coach' || u.role === 'admin')
+          .sort((a, b) => {
+            if (a.id === myProfile?.assignedCoachId) return -1;
+            if (b.id === myProfile?.assignedCoachId) return 1;
+            return a.displayName.localeCompare(b.displayName, 'fr');
+          });
 
   const accessibleRoadbooks = store.roadbooks.filter(
     (r) => r.userId === currentUser.id || r.isPublic || access.canAccessCoachDashboard

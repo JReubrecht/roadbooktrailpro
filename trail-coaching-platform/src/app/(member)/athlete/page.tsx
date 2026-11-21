@@ -45,7 +45,16 @@ export default function AthleteDashboardPage() {
     .filter((s) => s.userId === currentUser.id)
     .sort((a, b) => b.snapshotDate.localeCompare(a.snapshotDate));
   const latestSnap = snapshots[0] || null;
-  const connection = store.intervalsConnections.find((c) => c.userId === currentUser.id) || null;
+  const assignedCoach = currentProfile?.assignedCoachId
+    ? store.users.find((u) => u.id === currentProfile.assignedCoachId) || null
+    : null;
+  const connection =
+    store.intervalsConnections.find(
+      (c) => c.userId === currentUser.id && c.connectionScope !== 'coach'
+    ) || null;
+  const coachConn = assignedCoach
+    ? store.intervalsConnections.find((c) => c.userId === assignedCoach.id) || null
+    : null;
   const checkIns = store.checkIns
     .filter((c) => c.userId === currentUser.id)
     .sort((a, b) => b.checkInDate.localeCompare(a.checkInDate));
@@ -77,11 +86,18 @@ export default function AthleteDashboardPage() {
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-3 font-mono text-[11px] uppercase tracking-wider">
             <span className="text-[#FF5A36] font-semibold">{access.tierBadgeLabel}</span>
+            {assignedCoach && (
+              <span className="text-[#047857] font-semibold">
+                COACH RÉFÉRENT : {assignedCoach.displayName}
+              </span>
+            )}
             {currentProfile?.trailIndex && (
               <span className="text-slate-500">ITRA {currentProfile.trailIndex}</span>
             )}
-            {connection && (
-              <span className="text-slate-400">INTERVALS {connection.intervalsAthleteId}</span>
+            {(currentProfile?.intervalsAthleteId || connection?.intervalsAthleteId) && (
+              <span className="text-slate-400">
+                INTERVALS {currentProfile?.intervalsAthleteId || connection?.intervalsAthleteId}
+              </span>
             )}
           </div>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-[#0F172A]">
@@ -148,13 +164,17 @@ export default function AthleteDashboardPage() {
               Aucun snapshot Intervals.icu synchronisé pour ce compte.
             </p>
             <p className="text-xs text-slate-500 max-w-md mx-auto">
-              Renseignez votre ID athlète et clé API dans vos paramètres (chiffrement AES-256-GCM côté serveur).
+              {assignedCoach
+                ? `Votre suivi Intervals.icu est piloté directement par votre coach (${assignedCoach.displayName}) — aucune clé API n'est requise de votre côté${
+                    coachConn?.hasSecret ? ' (liaison coach active).' : '.'
+                  }`
+                : 'Renseignez votre ID athlète et clé API dans vos paramètres (chiffrement AES-256-GCM côté serveur).'}
             </p>
             <Link
               href="/athlete/settings"
               className="inline-block px-4 py-2 rounded-md bg-[#0F172A] text-white text-xs font-semibold"
             >
-              Connecter Intervals.icu &rarr;
+              {assignedCoach ? 'Voir ma liaison coach' : 'Connecter Intervals.icu →'}
             </Link>
           </div>
         ) : (

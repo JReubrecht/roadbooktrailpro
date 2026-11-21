@@ -1,4 +1,4 @@
-import type { IntervalsSnapshot } from '@/types/domain';
+import type { IntervalsCoachedAthlete, IntervalsSnapshot } from '@/types/domain';
 
 const INTERVALS_BASE_URL = 'https://intervals.icu/api/v1';
 
@@ -265,4 +265,144 @@ export async function fetchIntervalsSnapshotServer(
       latestWellness.compliance !== undefined ? Math.round(Number(latestWellness.compliance)) : undefined,
     fetchedAt: new Date().toISOString(),
   };
+}
+
+interface IntervalsRawRosterEntry {
+  id?: string | number;
+  athlete_id?: string | number;
+  name?: string;
+  athlete_name?: string;
+  firstname?: string;
+  lastname?: string;
+  email?: string;
+  ctl?: number;
+  fitness?: number;
+  atl?: number;
+  fatigue?: number;
+  icu_permission?: string;
+  permission?: string;
+}
+
+function normalizeRosterEntries(raw: unknown): IntervalsCoachedAthlete[] {
+  const arr: IntervalsRawRosterEntry[] = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === 'object' && Array.isArray((raw as { athletes?: unknown[] }).athletes)
+      ? ((raw as { athletes: IntervalsRawRosterEntry[] }).athletes)
+      : [];
+
+  const byId = new Map<string, IntervalsCoachedAthlete>();
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const rawId = item.id ?? item.athlete_id;
+    if (rawId === undefined || rawId === null) continue;
+    const idStr = String(rawId).trim();
+    if (!idStr || idStr === '0') continue;
+
+    const fullName =
+      item.name ||
+      item.athlete_name ||
+      `${item.firstname || ''} ${item.lastname || ''}`.trim() ||
+      idStr;
+
+    const ctlRaw = item.ctl ?? item.fitness;
+    const atlRaw = item.atl ?? item.fatigue;
+
+    byId.set(idStr.toLowerCase(), {
+      intervalsAthleteId: idStr,
+      name: fullName.trim(),
+      ...(typeof item.email === 'string' && item.email.trim()
+        ? { email: item.email.trim() }
+        : {}),
+      ...(ctlRaw !== undefined && Number.isFinite(Number(ctlRaw))
+        ? { ctl: Math.round(Number(ctlRaw)) }
+        : {}),
+      ...(atlRaw !== undefined && Number.isFinite(Number(atlRaw))
+        ? { atl: Math.round(Number(atlRaw)) }
+        : {}),
+      ...(typeof (item.icu_permission ?? item.permission) === 'string'
+        ? { permission: String(item.icu_permission ?? item.permission) }
+        : {}),
+    });
+  }
+
+  return Array.from(byId.values()).sort((a, b) =>
+    a.name.localeCompare(b.name, 'fr')
+  );
+}
+
+/**
+ * Récupère la liste des athlètes coachés/suivis directement depuis le compte Coach Intervals.icu.
+ */
+export async function fetchCoachIntervalsRosterServer(
+  rawApiKey: string,
+  coachAthleteId = '0'
+): Promise<IntervalsCoachedAthlete[]> {
+  const cleanKey = normalizeIntervalsApiKey(rawApiKey);
+  if (!cleanKey) {
+    throw new Error('Clé API Coach Intervals.icu manquante.');
+  }
+
+  const headers = {
+    Authorization: buildBasicAuthHeader(cleanKey),
+    'Content-Type': 'application/json',
+  };
+
+  let primaryOk = false;
+  let primaryRoster: IntervalsCoachedAthlete[] = [];
+
+  try {
+    const res = await fetch(`${INTERVALS_BASE_URL}/athletes`, {
+      headers,
+      signal: AbortSignal.timeout(10000),
+      cache: 'no-store',
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(
+        "Accès Coach Intervals.icu refusé (401/403) : vérifiez la clé API du coach."
+      );
+    }
+
+    if (res.ok) {
+      primaryOk = true;
+      const json = (await res.json()) as unknown;
+      primaryRoster = normalizeRosterEntries(json);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('401/403')) {
+      throw err;
+    }
+  }
+
+  if (primaryOk && primaryRoster.length > 0) {
+    return primaryRoster;
+  }
+
+  const normalizedCoachId = normalizeIntervalsAthleteId(coachAthleteId);
+  const summaryRes = await fetch(
+    `${INTERVALS_BASE_URL}/athlete/${normalizedCoachId}/athlete-summary`,
+    {
+      headers,
+      signal: AbortSignal.timeout(10000),
+      cache: 'no-store',
+    }
+  );
+
+  if (summaryRes.status === 401 || summaryRes.status === 403) {
+    throw new Error(
+      "Accès Coach Intervals.icu refusé (401/403) : vérifiez la clé API du coach."
+    );
+  }
+
+  if (!summaryRes.ok) {
+    if (primaryOk) {
+      return [];
+    }
+    throw new Error(
+      `Impossible de lister les athlètes Intervals.icu (HTTP ${summaryRes.status}).`
+    );
+  }
+
+  const summaryJson = (await summaryRes.json()) as unknown;
+  return normalizeRosterEntries(summaryJson);
 }

@@ -1,9 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth/serverAuth';
 import { getAdminDb, isFirebaseAdminConfigured } from '@/lib/firebase/admin';
+import { downsampleGpxPoints } from '@/lib/firebase/roadbookAdapter';
+import { findClosestPointIndex } from '@/lib/trail/geodesy';
 import { normalizeWaypointsForSave } from '@/lib/trail/roadbook';
 import { roadbookSaveSchema } from '@/lib/validation/schemas';
-import type { RoadbookWaypoint } from '@/types/domain';
+import type { GpxPoint, RoadbookWaypoint } from '@/types/domain';
+
+const MAX_SAVED_ROADBOOK_POINTS = 1200;
+
+function sanitizePointsForSave(rawPoints: Record<string, unknown>[]): GpxPoint[] {
+  const clean: GpxPoint[] = [];
+  for (const raw of rawPoints) {
+    const lat = Number(raw.lat);
+    const lon = Number(raw.lon ?? raw.lng);
+    const ele = Number(raw.ele ?? 0);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      clean.push({
+        lat,
+        lon,
+        ele: Number.isFinite(ele) ? ele : 0,
+      });
+    }
+  }
+  return clean;
+}
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -29,14 +50,46 @@ export async function POST(request: NextRequest) {
   const requestedOwner =
     auth.session.isCoachOrAdmin && data.userId ? data.userId : auth.session.uid;
 
-  const isPublicTemplate = auth.session.isCoachOrAdmin
-    ? Boolean(data.isPublicTemplate)
+  const isPublic = auth.session.isCoachOrAdmin
+    ? Boolean(data.isPublic ?? data.isPublicTemplate)
     : false;
+  const isPublicTemplate = auth.session.isCoachOrAdmin
+    ? Boolean(data.isPublicTemplate ?? data.isPublic)
+    : false;
+
+  const parsedPoints = sanitizePointsForSave(data.points);
+  const wasDownsampled = parsedPoints.length > MAX_SAVED_ROADBOOK_POINTS;
+  const pointsForSave = downsampleGpxPoints(
+    parsedPoints,
+    MAX_SAVED_ROADBOOK_POINTS
+  );
+
+  const normalizedWaypoints = normalizeWaypointsForSave(
+    data.waypoints as RoadbookWaypoint[]
+  ).map((wp) => {
+    const hasValidIdx =
+      typeof wp.pointIndex === 'number' &&
+      wp.pointIndex >= 0 &&
+      wp.pointIndex < pointsForSave.length;
+    if (pointsForSave.length === 0) {
+      return { ...wp, pointIndex: 0 };
+    }
+    if (!wasDownsampled && hasValidIdx) {
+      return wp;
+    }
+    return {
+      ...wp,
+      pointIndex: Math.max(0, findClosestPointIndex(wp.lat, wp.lon, pointsForSave)),
+    };
+  });
+  normalizedWaypoints.sort((a, b) => a.pointIndex - b.pointIndex);
 
   const roadbookPayload = {
     ...data,
-    waypoints: normalizeWaypointsForSave(data.waypoints as RoadbookWaypoint[]),
+    points: pointsForSave,
+    waypoints: normalizedWaypoints,
     userId: requestedOwner,
+    isPublic,
     isPublicTemplate,
     updatedAt: nowIso,
   };

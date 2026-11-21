@@ -1,25 +1,32 @@
 import { z } from 'zod';
 
-export const intervalsConnectSchema = z.object({
-  userId: z.string().min(1, 'Identifiant utilisateur requis'),
-  intervalsAthleteId: z
-    .string()
-    .trim()
-    .min(1, "L'ID Athlète Intervals.icu (ex: i123456 ou 0) est requis")
-    .max(64),
-  apiKey: z
-    .string()
-    .trim()
-    .min(8, 'La clé API Intervals.icu semble trop courte')
-    .max(256),
-  authMode: z.enum(['api_key', 'oauth']).default('api_key'),
-  healthDataConsent: z.literal(true, {
-    errorMap: () => ({
-      message:
-        'Votre consentement explicite au traitement des données physiologiques (RGPD Art. 9) est obligatoire pour connecter Intervals.icu.',
-    }),
-  }),
-});
+export const intervalsConnectSchema = z
+  .object({
+    userId: z.string().min(1, 'Identifiant utilisateur requis'),
+    intervalsAthleteId: z
+      .string()
+      .trim()
+      .min(1, "L'ID Intervals.icu (ex: i123456 ou 0) est requis")
+      .max(64),
+    apiKey: z
+      .string()
+      .trim()
+      .min(8, 'La clé API Intervals.icu semble trop courte')
+      .max(256),
+    authMode: z.enum(['api_key', 'oauth']).default('api_key'),
+    connectionScope: z.enum(['coach', 'athlete']).default('athlete'),
+    healthDataConsent: z.boolean().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.connectionScope !== 'coach' && data.healthDataConsent !== true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['healthDataConsent'],
+        message:
+          'Votre consentement explicite au traitement des données physiologiques (RGPD Art. 9) est obligatoire pour connecter Intervals.icu.',
+      });
+    }
+  });
 
 export const intervalsSyncSchema = z.object({
   userId: z.string().min(1),
@@ -268,6 +275,8 @@ export const roadbookSaveSchema = z
 export const athleteProfilePatchSchema = z
   .object({
     userId: z.string().min(1),
+    assignedCoachId: z.string().trim().min(1).max(128).nullable().optional(),
+    intervalsAthleteId: z.string().trim().max(64).nullable().optional(),
     notesCoach: z.string().max(5000).optional(),
     tierStatus: z
       .enum(['free', 'plan_only', 'coaching_paid', 'pilot_showcase'])
@@ -303,4 +312,21 @@ export const trainingPlanUpsertSchema = z
 
 export const communityLikeSchema = z.object({
   postId: z.string().min(1).max(120),
+});
+
+export const coachCreateSchema = z.object({
+  email: z.string().trim().email('Adresse email invalide').max(160),
+  displayName: z.string().trim().min(2, 'Nom requis').max(100),
+  role: z.enum(['coach', 'admin']).default('coach'),
+  coachSpecialty: z.string().trim().max(160).optional(),
+  coachBio: z.string().trim().max(600).optional(),
+});
+
+export const coachUpdateSchema = z.object({
+  userId: z.string().min(1, 'Identifiant coach requis'),
+  displayName: z.string().trim().min(2).max(100).optional(),
+  role: z.enum(['athlete', 'coach', 'admin']).optional(),
+  coachSpecialty: z.string().trim().max(160).optional(),
+  coachBio: z.string().trim().max(600).optional(),
+  coachActive: z.boolean().optional(),
 });

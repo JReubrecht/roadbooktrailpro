@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireCoachOrAdmin } from '@/lib/auth/serverAuth';
+import { requireAdmin } from '@/lib/auth/serverAuth';
 import { getAdminDb, isFirebaseAdminConfigured } from '@/lib/firebase/admin';
 import { adminConfigUpdateSchema } from '@/lib/validation/schemas';
 
 export async function PATCH(request: NextRequest) {
-  const auth = await requireCoachOrAdmin(request);
+  const auth = await requireAdmin(request);
   if (!auth.ok) return auth.response;
 
   let body: unknown;
